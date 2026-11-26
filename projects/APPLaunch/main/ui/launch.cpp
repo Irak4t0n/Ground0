@@ -211,6 +211,16 @@ const app *Launch::carousel_slot_app(size_t slot) const
     return app_at_index(current_app + static_cast<int>(slot) - kHomeCarouselCenterSlot);
 }
 
+const app *Launch::app_at(std::size_t index) const
+{
+    return index < app_list.size() ? app_at_index(static_cast<int>(index)) : nullptr;
+}
+
+void Launch::select_app(std::size_t index)
+{
+    if (index < app_list.size()) current_app = static_cast<int>(index);
+}
+
 void Launch::applications_load()
 {
     launcher_append_desktop_apps(app_list);

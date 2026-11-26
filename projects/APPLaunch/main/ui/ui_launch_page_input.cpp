@@ -75,6 +75,15 @@ void UILaunchPage::handle_home_key(lv_event_t *event)
         return;
     }
 
+    if (ground0_ && ground0_->valid()) {
+        if (ground0_->handle_key(*elm) == Ground0Home::Action::Launch && launch_) {
+            launch_->select_app(ground0_->selected());
+            audio_play_enter();
+            launch_selected_app();
+        }
+        return;
+    }
+
     uint32_t code = elm->semantic_key ? elm->semantic_key : fzxc_to_arrow(elm->key_code);
 
     SLOGI("[LAUNCHER] main_key_switch raw=%u->code=%u state=%s sym=%s",

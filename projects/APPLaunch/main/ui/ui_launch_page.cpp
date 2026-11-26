@@ -314,10 +314,12 @@ void UILaunchPage::refresh_carousel()
             update_carousel_slot(slot, "", {});
     }
     launcher_home_animation::apply_title_overflow(label(kCardCenter), true);
+    sync_ground0();
 }
 
 void UILaunchPage::reload_home_icons(const std::vector<std::string> &icon_paths)
 {
+    if (ground0_) ground0_->release_icons();
     HomeIconBufferPool replacement;
     replacement.rebuild(icon_paths);
     home_icon_pool_.swap(replacement);

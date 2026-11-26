@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "ground0_home.hpp"
 #include "home_icon_buffer_pool.hpp"
 #include "launcher_ui_app_page.hpp"
 #include "model/launcher_navigation_model.hpp"
@@ -80,6 +81,7 @@ private:
     };
 
     void create_app_container(lv_obj_t *parent);
+    void sync_ground0();
     void switch_left();
     void switch_right();
     void fill_left_entering_slot(lv_obj_t *panel, lv_obj_t *label);
@@ -137,5 +139,7 @@ private:
         std::make_shared<StartupSoundAsyncState>();
     std::shared_ptr<bool> carousel_alive_ = std::make_shared<bool>(true);
     bool home_key_registered_ = false;
+    // Declared last so it is destroyed first, while the icon pool still exists.
+    std::unique_ptr<Ground0Home> ground0_;
     bool active_navigation_moves_next_ = false;
 };

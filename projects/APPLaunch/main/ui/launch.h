@@ -68,6 +68,9 @@ public:
     std::size_t app_count() const;
     std::size_t current_app_index() const;
     const app *carousel_slot_app(size_t slot) const;
+    // Ground0: direct access by list position.
+    const app *app_at(std::size_t index) const;
+    void select_app(std::size_t index);
     void launch_app();
 
 private:

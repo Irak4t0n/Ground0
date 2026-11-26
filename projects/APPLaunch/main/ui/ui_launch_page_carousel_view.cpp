@@ -350,4 +350,35 @@ void UILaunchPage::create_app_container(lv_obj_t *parent)
         lv_obj_add_event_cb(screen(), on_home_key, (lv_event_code_t)LV_EVENT_KEYBOARD, this);
         home_key_registered_ = true;
     }
+
+    // Ground0 draws its own full-screen home over the stock carousel.
+    if (!ground0_ || !ground0_->valid()) {
+        ground0_ = std::make_unique<Ground0Home>(
+            top_container(), [this](const std::string &path, uint32_t size) -> const lv_image_dsc_t * {
+                const lv_image_dsc_t *icon = home_icon_pool_.find(path, size);
+                // The pool answers with a 100 px icon when it cannot resize one.
+                return icon && icon->header.w == size ? icon : nullptr;
+            });
+    }
+    sync_ground0();
+}
+
+void UILaunchPage::sync_ground0()
+{
+    if (!ground0_ || !ground0_->valid() || !launch_) return;
+    std::vector<Ground0Item> items;
+    const std::size_t count = launch_->app_count();
+    items.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const app *entry = launch_->app_at(i);
+        if (!entry) continue;
+        std::string detail = "built-in";
+        if (!entry->Exec.empty()) {
+            const std::string program = entry->Exec.substr(0, entry->Exec.find(' '));
+            const std::size_t slash = program.find_last_of('/');
+            detail = slash == std::string::npos ? program : program.substr(slash + 1);
+        }
+        items.push_back({entry->Name, entry->Icon, std::move(detail)});
+    }
+    ground0_->set_items(std::move(items), launch_->current_app_index());
 }
