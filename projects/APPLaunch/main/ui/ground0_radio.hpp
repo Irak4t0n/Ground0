@@ -14,7 +14,8 @@
 //   ground0_radio_free     apps that need the daemon stopped (comma separated)
 //   ground0_radio_mesh     apps that need the daemon running (comma separated)
 //   ground0_radio_restore  "1": start the daemon again when a free-radio app exits
-// An app matches when its name or Exec contains one of the listed words.
+// An app matches when its name, or the file name of a path in its Exec line,
+// equals one of the listed words (case-insensitive).
 #pragma once
 
 #include <string>

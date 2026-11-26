@@ -110,8 +110,15 @@ void UILaunchPage::handle_home_key(lv_event_t *event)
             // so the radio stays as it is.
             const bool app_has_exited =
                 std::chrono::steady_clock::now() - started > std::chrono::seconds(2);
-            if (restore_mesh && app_has_exited) radio.request(true);
-            if (ground0_ && ground0_->valid()) ground0_->refresh_radio();
+            const bool restoring = restore_mesh && app_has_exited;
+            if (restoring) radio.request(true);
+            if (ground0_ && ground0_->valid()) {
+                // The daemon takes a moment to come up: show it as pending, not FREE.
+                if (restoring)
+                    ground0_->expect_radio(true);
+                else
+                    ground0_->refresh_radio();
+            }
         }
         return;
     }

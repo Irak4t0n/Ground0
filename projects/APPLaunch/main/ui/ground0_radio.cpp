@@ -44,12 +44,6 @@ std::vector<std::string> words(const std::string &list)
     return out;
 }
 
-bool contains_any(const std::string &text, const std::vector<std::string> &list)
-{
-    return std::any_of(list.begin(), list.end(),
-                       [&](const std::string &word) { return text.find(word) != std::string::npos; });
-}
-
 // A unit name goes onto a command line: letters, digits and . _ - @ only.
 bool safe_unit(const std::string &unit)
 {
@@ -71,7 +65,7 @@ Radio::Radio()
 {
     unit_ = config_str("ground0_radio_unit", "meshzero.service");
     if (!safe_unit(unit_)) unit_.clear();
-    free_words_ = words(config_str("ground0_radio_free", "lora-tunnel,quartermaster,camillia,pocket-lorascan,cap-lora-1262,meshterm"));
+    free_words_ = words(config_str("ground0_radio_free", "lora-tunnel,quartermaster,camillia-launch,camillia,cap-lora-1262,pocket-lorascan,octet,meshterm"));
     mesh_words_ = words(config_str("ground0_radio_mesh", "1999online"));
     restore_ = config_str("ground0_radio_restore", "1") != "0";
     if (const char *sim = std::getenv("GROUND0_RADIO_SIM")) {
@@ -124,9 +118,23 @@ bool Radio::set_blocking(bool mesh_on)
 
 Radio::Need Radio::need_for(const std::string &name, const std::string &exec) const
 {
-    const std::string text = lower(name + " " + exec);
-    if (contains_any(text, free_words_)) return Need::Free;
-    if (contains_any(text, mesh_words_)) return Need::Mesh;
+    // Exact match on the app name or on the file name of any path in its Exec
+    // line, so "cap-lora-1262" does not also catch "...-cap-lora-1262-gps".
+    std::vector<std::string> keys = {lower(name)};
+    std::stringstream tokens(exec);
+    std::string token;
+    while (tokens >> token) {
+        if (token.empty() || token[0] != '/') continue;
+        const std::size_t slash = token.find_last_of('/');
+        keys.push_back(lower(token.substr(slash + 1)));
+    }
+    auto listed = [&](const std::vector<std::string> &list) {
+        return std::any_of(keys.begin(), keys.end(), [&](const std::string &key) {
+            return std::find(list.begin(), list.end(), key) != list.end();
+        });
+    };
+    if (listed(free_words_)) return Need::Free;
+    if (listed(mesh_words_)) return Need::Mesh;
     return Need::None;
 }
 

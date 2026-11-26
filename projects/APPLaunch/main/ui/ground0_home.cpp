@@ -18,9 +18,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <string>
 #include <utility>
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -290,6 +292,30 @@ std::string join_list(const std::vector<std::string> &list)
     return out;
 }
 
+std::string cache_path(const char *file)
+{
+    const char *home = std::getenv("HOME");
+    return std::string(home ? home : "/tmp") + "/.cache/ground0/" + file;
+}
+
+std::string helper_path()
+{
+    if (const char *path = std::getenv("GROUND0_HELPER")) return path;
+    return "/usr/share/APPLaunch/share/ground0/ground0-helper.py";
+}
+
+long file_stamp(const std::string &path)
+{
+    struct stat status;
+    return stat(path.c_str(), &status) == 0 ? static_cast<long>(status.st_mtime) : 0;
+}
+
+// Store category order, so the lists always cycle the same way.
+const char *const kCategoryOrder[] = {
+    "Security", "Radio & Comms", "Hardware & IoT", "System Tools", "Development", "AI",
+    "Media", "Creative & Office", "Games", "Emulators", "Education", "Lifestyle", "Other",
+};
+
 std::string lower(const std::string &value)
 {
     std::string out = value;
@@ -324,7 +350,9 @@ Ground0Home::Ground0Home(lv_obj_t *parent, IconLookup lookup)
     if (!root_) return;
     lv_obj_add_event_cb(root_, on_root_deleted, LV_EVENT_DELETE, this);
     status_timer_ = lv_timer_create(on_status_timer, 15000, this);
+    rebuild_tabs(saved_tab_);
     rebuild();
+    request_index();
 }
 
 Ground0Home::~Ground0Home()
@@ -333,6 +361,8 @@ Ground0Home::~Ground0Home()
     status_timer_ = nullptr;
     if (radio_timer_) lv_timer_delete(radio_timer_);
     radio_timer_ = nullptr;
+    if (update_timer_) lv_timer_delete(update_timer_);
+    update_timer_ = nullptr;
     if (root_) {
         lv_obj_remove_event_cb_with_user_data(root_, on_root_deleted, this);
         lv_obj_delete(root_);
@@ -347,6 +377,7 @@ void Ground0Home::on_root_deleted(lv_event_t *event) noexcept
     self->root_ = nullptr;
     self->clock_ = self->battery_ = self->strip_left_ = self->strip_right_ = nullptr;
     self->foot_label_ = nullptr;
+    self->chip_label_ = nullptr;
     self->radio_chip_ = self->radio_label_ = nullptr;
     self->detail_icon_ = self->detail_name_ = self->detail_sub_ = nullptr;
     self->rows_ = {};
@@ -367,8 +398,7 @@ void Ground0Home::load_settings()
     const int index = ground0::theme_from_id(config_get_str("ground0_theme", "chromeshore").c_str());
     ground0::set_theme(index < 0 ? 0 : index);
     view_ = config_get_str("ground0_view", "list") == "grid" ? View::Grid : View::List;
-    const std::string tab = config_get_str("ground0_tab", "all");
-    tab_ = tab == "favs" ? Tab::Favs : tab == "recent" ? Tab::Recent : Tab::All;
+    saved_tab_ = config_get_str("ground0_tab", "All apps");
     favorites_ = split_list(config_get_str("ground0_favs", ""));
     recents_ = split_list(config_get_str("ground0_recent", ""));
 }
@@ -377,7 +407,7 @@ void Ground0Home::save_settings()
 {
     config_set_str("ground0_theme", ground0::theme().id);
     config_set_str("ground0_view", view_ == View::Grid ? "grid" : "list");
-    config_set_str("ground0_tab", tab_ == Tab::Favs ? "favs" : tab_ == Tab::Recent ? "recent" : "all");
+    config_set_str("ground0_tab", tab_label());
     config_set_str("ground0_favs", join_list(favorites_));
     config_set_str("ground0_recent", join_list(recents_));
 }
@@ -397,6 +427,19 @@ void Ground0Home::release_icons()
 void Ground0Home::set_items(std::vector<Ground0Item> items, std::size_t selected)
 {
     items_ = std::move(items);
+    load_index();
+    for (Ground0Item &item : items_) {
+        const auto found = index_.find(item.exec);
+        if (found != index_.end()) {
+            item.category = found->second.category;
+            item.uuid = found->second.uuid;
+            item.have = found->second.have;
+            item.next = found->second.next;
+        } else if (item.category.empty()) {
+            item.category = item.exec.empty() ? "System Tools" : "Other";
+        }
+    }
+    rebuild_tabs(tabs_.empty() ? saved_tab_ : tab_label());
     refilter(selected);
 }
 
@@ -414,11 +457,15 @@ void Ground0Home::refilter(std::size_t keep_item)
         int rank = 0;
         if (searching_) {
             rank = match_rank(lower(items_[i].name), query);   // search always covers every app
-        } else if (tab_ == Tab::Favs) {
+        } else if (tab_kind() == TabKind::Favs) {
             rank = is_favorite(items_[i].name) ? 0 : -1;
-        } else if (tab_ == Tab::Recent) {
+        } else if (tab_kind() == TabKind::Recent) {
             const auto found = std::find(recents_.begin(), recents_.end(), items_[i].name);
             rank = found == recents_.end() ? -1 : static_cast<int>(found - recents_.begin());
+        } else if (tab_kind() == TabKind::Updates) {
+            rank = items_[i].next.empty() ? -1 : 0;
+        } else if (tab_kind() == TabKind::Category) {
+            rank = items_[i].category == tab_label() ? 0 : -1;
         }
         if (rank >= 0) ranked.emplace_back(rank, i);
     }
@@ -445,6 +492,7 @@ void Ground0Home::rebuild()
     lv_obj_clean(root_);
     clock_ = battery_ = strip_left_ = strip_right_ = nullptr;
     foot_label_ = nullptr;
+    chip_label_ = nullptr;
     radio_chip_ = radio_label_ = nullptr;
     detail_icon_ = detail_name_ = detail_sub_ = nullptr;
     rows_ = {};
@@ -560,8 +608,14 @@ void Ground0Home::toggle_radio()
 {
     ground0::Radio &radio = ground0::Radio::instance();
     if (radio.poll() == ground0::RadioState::Absent || radio_pending_) return;
-    radio_target_mesh_ = radio.state() != ground0::RadioState::Mesh;
-    radio.request(radio_target_mesh_);
+    const bool mesh_on = radio.state() != ground0::RadioState::Mesh;
+    radio.request(mesh_on);
+    expect_radio(mesh_on);
+}
+
+void Ground0Home::expect_radio(bool mesh_on)
+{
+    radio_target_mesh_ = mesh_on;
     radio_pending_ = true;
     radio_polls_left_ = 14;
     if (!radio_timer_) radio_timer_ = lv_timer_create(on_radio_timer, 700, this);
@@ -625,6 +679,8 @@ void Ground0Home::build_list()
         lv_obj_set_style_border_width(row.box, outline ? 1 : 0, LV_PART_MAIN);
         row.name = text(row.box, 8, centred(kRowH, name_font), kListW - kRowIcon - 20, name_font, t.text, "");
         row.mark = box(row.box, 2, kRowH / 2 - 2, 3, 4, t.accent2);
+        row.badge = box(row.box, kListW - kRowIcon - 16, kRowH / 2 - 3, 6, 6, t.accent2);
+        if (row.badge) lv_obj_set_style_radius(row.badge, LV_RADIUS_CIRCLE, LV_PART_MAIN);
         row.icon = lv_image_create(row.box);
         if (row.icon) {
             lv_obj_set_pos(row.icon, kListW - kRowIcon - 7, (kRowH - kRowIcon) / 2);
@@ -658,14 +714,14 @@ void Ground0Home::build_list()
         lv_obj_t *chip = box(pane, chip_x, chip_y, chip_w, chip_h, t.face);
         if (chip) {
             bevel_edge(chip, 0, 0, chip_w, chip_h, true);
-            text(chip, 0, centred(chip_h, chip_text), chip_w, chip_text, t.text, "Enter open", LV_TEXT_ALIGN_CENTER);
+            chip_label_ = text(chip, 0, centred(chip_h, chip_text), chip_w, chip_text, t.text, "Enter open", LV_TEXT_ALIGN_CENTER);
         }
     } else {
         lv_obj_t *chip = box(pane, chip_x, chip_y, chip_w, chip_h, t.accent);
         if (chip) {
             if (t.gloss) gradient(chip, lighten(t.accent, 35), t.accent, false);
             lv_obj_set_style_radius(chip, t.radius, LV_PART_MAIN);
-            text(chip, 0, centred(chip_h, chip_text), chip_w, chip_text, t.on_accent, "Enter open", LV_TEXT_ALIGN_CENTER);
+            chip_label_ = text(chip, 0, centred(chip_h, chip_text), chip_w, chip_text, t.on_accent, "Enter open", LV_TEXT_ALIGN_CENTER);
         }
     }
 }
@@ -749,13 +805,12 @@ void Ground0Home::bind()
         if (searching_)
             std::snprintf(buffer, sizeof(buffer), "> %s_", query_.c_str());
         else if (count == 0)
-            std::snprintf(buffer, sizeof(buffer), "%s", tab_ == Tab::Favs ? "Favs: none yet, V adds one"
-                                                      : tab_ == Tab::Recent ? "Recent: nothing opened yet"
-                                                                            : "No apps");
+            std::snprintf(buffer, sizeof(buffer), "%s",
+                          tab_kind() == TabKind::Favs ? "Favs: none yet, V adds one"
+                          : tab_kind() == TabKind::Recent ? "Recent: nothing opened yet"
+                          : tab_kind() == TabKind::Updates ? "Updates: all up to date" : "No apps");
         else
-            std::snprintf(buffer, sizeof(buffer), "%s  %zu of %zu",
-                          tab_ == Tab::Favs ? "Favs" : tab_ == Tab::Recent ? "Recent" : "All apps",
-                          selected_ + 1, count);
+            std::snprintf(buffer, sizeof(buffer), "%s  %zu of %zu", tab_label().c_str(), selected_ + 1, count);
         lv_label_set_text(strip_left_, buffer);
         // Search text takes the accent colour where that reads against the strip.
         const bool accent_reads = reads_on(t.accent, t.strip);
@@ -769,9 +824,20 @@ void Ground0Home::bind()
             std::snprintf(buffer, sizeof(buffer), count == 1 ? "%zu match" : "%zu matches", count);
             lv_label_set_text(strip_right_, buffer);
         } else {
-            lv_label_set_text(strip_right_, t.name);
+            const std::size_t updates = static_cast<std::size_t>(std::count_if(
+                items_.begin(), items_.end(), [](const Ground0Item &item) { return !item.next.empty(); }));
+            char buffer[48];
+            if (tab_kind() == TabKind::Updates && updates > 0)
+                std::snprintf(buffer, sizeof(buffer), "Enter one  A all");
+            else if (updates > 0)
+                std::snprintf(buffer, sizeof(buffer), updates == 1 ? "%zu update" : "%zu updates", updates);
+            else
+                std::snprintf(buffer, sizeof(buffer), "%s", t.name);
+            lv_label_set_text(strip_right_, buffer);
         }
     }
+    if (chip_label_)
+        lv_label_set_text(chip_label_, tab_kind() == TabKind::Updates && !searching_ ? "Enter update" : "Enter open");
     if (foot_label_) {
         const bool has_radio = ground0::Radio::instance().state() != ground0::RadioState::Absent;
         const char *hint = searching_
@@ -811,6 +877,12 @@ void Ground0Home::bind_list()
             else
                 lv_obj_add_flag(row.mark, LV_OBJ_FLAG_HIDDEN);
         }
+        if (row.badge) {
+            if (!items_[index].next.empty())
+                lv_obj_clear_flag(row.badge, LV_OBJ_FLAG_HIDDEN);
+            else
+                lv_obj_add_flag(row.badge, LV_OBJ_FLAG_HIDDEN);
+        }
         set_icon(row.icon, items_[index].icon, kRowIcon);
     }
 
@@ -818,7 +890,13 @@ void Ground0Home::bind_list()
         const Ground0Item &item = items_[visible_[selected_]];
         set_icon(detail_icon_, item.icon, kDetailIcon);
         if (detail_name_) lv_label_set_text(detail_name_, item.name.c_str());
-        if (detail_sub_) lv_label_set_text(detail_sub_, item.detail.c_str());
+        if (detail_sub_) {
+            const std::string sub = !item.next.empty() ? item.have + " > " + item.next + "  U updates"
+                                    : !item.category.empty() ? item.category : item.detail;
+            lv_label_set_text(detail_sub_, sub.c_str());
+            lv_obj_set_style_text_color(
+                detail_sub_, hex(!item.next.empty() && reads_on(t.accent2, t.face) ? t.accent2 : t.dim), LV_PART_MAIN);
+        }
     } else {
         set_icon(detail_icon_, {}, kDetailIcon);
         if (detail_name_) lv_label_set_text(detail_name_, "");
@@ -853,6 +931,7 @@ void Ground0Home::bind_grid()
 void Ground0Home::update_status()
 {
     if (!radio_pending_) refresh_radio();
+    if (!updating_ && file_stamp(cache_path("index.tsv")) != index_stamp_) apply_index();
     if (clock_) {
         char buffer[8] = "--:--";
         const std::time_t now = std::time(nullptr);
@@ -885,12 +964,17 @@ void Ground0Home::move(int delta)
 Ground0Home::Action Ground0Home::handle_key(const struct key_item &item)
 {
     if (!root_) return Action::None;
+    if (updating_) return Action::Handled;   // an update is running: keys wait
     if (searching_) return handle_search_key(item);
 
     const uint32_t code = item.semantic_key ? item.semantic_key : item.key_code;
 
     if (item.key_state == KBD_KEY_RELEASED) {
         if (code != KEY_ENTER || visible_.empty()) return Action::None;
+        if (tab_kind() == TabKind::Updates) {
+            start_update({items_[visible_[selected_]].uuid});   // in Updates, Enter updates this one
+            return Action::Handled;
+        }
         note_launch();
         return Action::Launch;
     }
@@ -927,6 +1011,20 @@ Ground0Home::Action Ground0Home::handle_key(const struct key_item &item)
     }
     if (code == KEY_V) {
         toggle_favorite();
+        return Action::Handled;
+    }
+    if (code == KEY_U && selected_ < visible_.size()) {
+        const Ground0Item &chosen = items_[visible_[selected_]];
+        if (chosen.next.empty())
+            launcher_toast().show("No update for this app");
+        else
+            start_update({chosen.uuid});
+        return Action::Handled;
+    }
+    if (code == KEY_A && tab_kind() == TabKind::Updates) {
+        std::vector<std::string> all;
+        for (const std::size_t index : visible_) all.push_back(items_[index].uuid);
+        start_update(all);
         return Action::Handled;
     }
     if (code == KEY_M) {
@@ -1012,9 +1110,10 @@ bool Ground0Home::is_favorite(const std::string &name) const
 
 void Ground0Home::switch_tab(int step)
 {
+    if (tabs_.empty()) return;
     const std::size_t keep = selected();
-    const int next = ((static_cast<int>(tab_) + step) % 3 + 3) % 3;
-    tab_ = static_cast<Tab>(next);
+    const int count = static_cast<int>(tabs_.size());
+    tab_index_ = static_cast<std::size_t>(((static_cast<int>(tab_index_) + step) % count + count) % count);
     save_settings();
     refilter(keep);
 }
@@ -1036,7 +1135,7 @@ void Ground0Home::toggle_favorite()
     const std::size_t position = selected_;
     refilter(item);
     // Removing from the Favs list drops the row: stay near where the cursor was.
-    if (tab_ == Tab::Favs && !visible_.empty() &&
+    if (tab_kind() == TabKind::Favs && !visible_.empty() &&
         std::find(visible_.begin(), visible_.end(), item) == visible_.end()) {
         selected_ = std::min(position, visible_.size() - 1);
         bind();
@@ -1051,4 +1150,129 @@ void Ground0Home::note_launch()
     recents_.insert(recents_.begin(), name);
     if (recents_.size() > 12) recents_.resize(12);
     save_settings();
+}
+
+Ground0Home::TabKind Ground0Home::tab_kind() const
+{
+    return tab_index_ < tabs_.size() ? tabs_[tab_index_].kind : TabKind::All;
+}
+
+const std::string &Ground0Home::tab_label() const
+{
+    static const std::string all = "All apps";
+    return tab_index_ < tabs_.size() ? tabs_[tab_index_].label : all;
+}
+
+// Favs, All, Recent, Updates when there are any, then each store category in use.
+void Ground0Home::rebuild_tabs(const std::string &keep_label)
+{
+    tabs_.clear();
+    tabs_.push_back({TabKind::Favs, "Favs"});
+    tabs_.push_back({TabKind::All, "All apps"});
+    tabs_.push_back({TabKind::Recent, "Recent"});
+    if (std::any_of(items_.begin(), items_.end(), [](const Ground0Item &item) { return !item.next.empty(); }))
+        tabs_.push_back({TabKind::Updates, "Updates"});
+    auto used = [this](const std::string &category) {
+        return std::any_of(items_.begin(), items_.end(),
+                           [&](const Ground0Item &item) { return item.category == category; });
+    };
+    for (const char *category : kCategoryOrder)
+        if (used(category)) tabs_.push_back({TabKind::Category, category});
+    for (const Ground0Item &item : items_) {   // categories the store adds later
+        const bool known = std::any_of(tabs_.begin(), tabs_.end(),
+                                       [&](const TabDef &tab) { return tab.label == item.category; });
+        if (!item.category.empty() && !known) tabs_.push_back({TabKind::Category, item.category});
+    }
+    tab_index_ = 1;
+    for (std::size_t i = 0; i < tabs_.size(); ++i)
+        if (tabs_[i].label == keep_label) tab_index_ = i;
+}
+
+void Ground0Home::load_index()
+{
+    const std::string path = cache_path("index.tsv");
+    index_stamp_ = file_stamp(path);
+    index_.clear();
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+        std::vector<std::string> fields;
+        std::size_t start = 0;
+        while (true) {
+            const std::size_t tab = line.find('\t', start);
+            fields.push_back(line.substr(start, tab == std::string::npos ? std::string::npos : tab - start));
+            if (tab == std::string::npos) break;
+            start = tab + 1;
+        }
+        if (fields.size() < 5 || fields[0].empty()) continue;
+        index_[fields[0]] = {fields[1], fields[2], fields[3], fields[4]};
+    }
+}
+
+// The index file changed: re-attach its data to the current items.
+void Ground0Home::apply_index()
+{
+    const std::size_t keep = selected();
+    std::vector<Ground0Item> items = std::move(items_);
+    for (Ground0Item &item : items) item.category.clear(), item.uuid.clear(), item.have.clear(), item.next.clear();
+    set_items(std::move(items), keep);
+}
+
+void Ground0Home::request_index()
+{
+    const std::string helper = helper_path();
+    if (access(helper.c_str(), R_OK) != 0) return;
+    const char *argv[] = {"python3", helper.c_str(), "index", nullptr};
+    cp0_process_run_argv(argv, 1);
+}
+
+void Ground0Home::start_update(const std::vector<std::string> &uuids)
+{
+    if (updating_) return;
+    const std::string helper = helper_path();
+    std::vector<const char *> argv = {"python3", helper.c_str(), "apply"};
+    for (const std::string &uuid : uuids)
+        if (!uuid.empty()) argv.push_back(uuid.c_str());
+    if (argv.size() == 3 || access(helper.c_str(), R_OK) != 0) {
+        launcher_toast().show("Updates are not available");
+        return;
+    }
+    argv.push_back(nullptr);
+    unlink(cache_path("update.log").c_str());
+    cp0_process_run_argv(argv.data(), 1);
+    updating_ = true;
+    update_ticks_ = 0;
+    launcher_toast().show_persistent("Updating...");
+    if (!update_timer_) update_timer_ = lv_timer_create(on_update_timer, 800, this);
+}
+
+void Ground0Home::finish_update(const std::string &message)
+{
+    updating_ = false;
+    if (update_timer_) lv_timer_delete(update_timer_);
+    update_timer_ = nullptr;
+    launcher_toast().show(message.c_str());
+    if (root_) apply_index();
+}
+
+void Ground0Home::on_update_timer(lv_timer_t *timer) noexcept
+{
+    try {
+        auto *self = static_cast<Ground0Home *>(lv_timer_get_user_data(timer));
+        if (!self) return;
+        std::ifstream in(cache_path("update.log"));
+        std::string line, last;
+        while (std::getline(in, line))
+            if (!line.empty()) last = line;
+        if (last.rfind("RESULT ok", 0) == 0) {
+            self->finish_update("Updated: " + last.substr(10));
+        } else if (last.rfind("RESULT failed", 0) == 0) {
+            self->finish_update("Update failed: " + last.substr(14));
+        } else if (++self->update_ticks_ > 1500) {   // 20 minutes without a result
+            self->finish_update("Update did not finish");
+        } else if (last.rfind("STATUS ", 0) == 0) {
+            launcher_toast().show_persistent(last.substr(7).c_str());
+        }
+    } catch (...) {
+    }
 }

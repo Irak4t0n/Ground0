@@ -378,7 +378,12 @@ void UILaunchPage::sync_ground0()
             const std::size_t slash = program.find_last_of('/');
             detail = slash == std::string::npos ? program : program.substr(slash + 1);
         }
-        items.push_back({entry->Name, entry->Icon, std::move(detail)});
+        Ground0Item item;
+        item.name = entry->Name;
+        item.icon = entry->Icon;
+        item.detail = std::move(detail);
+        item.exec = entry->Exec;
+        items.push_back(std::move(item));
     }
     ground0_->set_items(std::move(items), launch_->current_app_index());
 }

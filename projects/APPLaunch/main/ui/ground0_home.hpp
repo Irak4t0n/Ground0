@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 struct Ground0Item
@@ -24,6 +25,12 @@ struct Ground0Item
     std::string name;
     std::string icon;     // icon path as known to the icon pool
     std::string detail;   // one short line for the detail pane
+    std::string exec;     // Exec line, the key into the app index
+    // Filled from the app index (see ground0-helper.py):
+    std::string category;
+    std::string uuid;
+    std::string have;     // installed version
+    std::string next;     // newer version available, or empty
 };
 
 class Ground0Home
@@ -35,7 +42,7 @@ public:
 
     enum class Action { None, Handled, Launch };
     enum class View { List, Grid };
-    enum class Tab { Favs, All, Recent };
+    enum class TabKind { Favs, All, Recent, Updates, Category };
 
     Ground0Home(lv_obj_t *parent, IconLookup lookup);
     ~Ground0Home();
@@ -52,6 +59,8 @@ public:
     Action handle_key(const struct key_item &item);
     // Re-read who holds the LoRa radio and repaint the status-bar chip.
     void refresh_radio();
+    // A start or stop was requested elsewhere: show it as pending until it lands.
+    void expect_radio(bool mesh_on);
 
 private:
     static constexpr int kListRows = 6;
@@ -65,6 +74,7 @@ private:
         lv_obj_t *name = nullptr;
         lv_obj_t *icon = nullptr;
         lv_obj_t *mark = nullptr;   // favourite marker
+        lv_obj_t *badge = nullptr;  // update available
     };
 
     void load_settings();
@@ -84,6 +94,14 @@ private:
     void move(int delta);
     void refilter(std::size_t keep_item);
     void switch_tab(int step);
+    void rebuild_tabs(const std::string &keep_label);
+    TabKind tab_kind() const;
+    const std::string &tab_label() const;
+    void load_index();
+    void apply_index();
+    void request_index();
+    void start_update(const std::vector<std::string> &uuids);
+    void finish_update(const std::string &message);
     void toggle_favorite();
     void note_launch();
     bool is_favorite(const std::string &name) const;
@@ -94,6 +112,7 @@ private:
     static void on_root_deleted(lv_event_t *event) noexcept;
     static void on_status_timer(lv_timer_t *timer) noexcept;
     static void on_radio_timer(lv_timer_t *timer) noexcept;
+    static void on_update_timer(lv_timer_t *timer) noexcept;
 
     lv_obj_t *parent_ = nullptr;
     lv_obj_t *root_ = nullptr;
@@ -102,6 +121,7 @@ private:
     lv_obj_t *strip_left_ = nullptr;
     lv_obj_t *strip_right_ = nullptr;
     lv_obj_t *foot_label_ = nullptr;
+    lv_obj_t *chip_label_ = nullptr;
     lv_obj_t *radio_chip_ = nullptr;
     lv_obj_t *radio_label_ = nullptr;
     lv_timer_t *radio_timer_ = nullptr;
@@ -122,7 +142,23 @@ private:
     std::size_t selected_ = 0;   // position in visible_
     std::size_t first_ = 0;      // first shown position (list) or page start (grid)
     bool searching_ = false;
-    Tab tab_ = Tab::All;
+    struct TabDef
+    {
+        TabKind kind;
+        std::string label;
+    };
+    struct IndexEntry
+    {
+        std::string category, uuid, have, next;
+    };
+    std::vector<TabDef> tabs_;
+    std::size_t tab_index_ = 0;
+    std::string saved_tab_ = "All apps";
+    std::unordered_map<std::string, IndexEntry> index_;   // by Exec line
+    long index_stamp_ = 0;          // modification time of the index file last loaded
+    lv_timer_t *update_timer_ = nullptr;
+    bool updating_ = false;
+    int update_ticks_ = 0;
     std::vector<std::string> favorites_;   // app names
     std::vector<std::string> recents_;     // app names, newest first
     std::string query_;
