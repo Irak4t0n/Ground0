@@ -1,6 +1,13 @@
 # Ground0 feature tour
 
-Every clip below is recorded from the Ground0 simulator build at the device's own resolution (320x170, shown at 2x). [`showcase.mp4`](showcase.mp4) is all of them in one video.
+A clip of every feature. The simulator clips are at the device's own resolution (320x170, shown at 2x); [`showcase.mp4`](showcase.mp4) is all of them in one video.
+
+## On the device
+Ground0 running on a Cardputer Zero: browsing the list and stepping through the lists with `Tab`. Full clip: [`demo-device.mp4`](demo-device.mp4).
+
+![Ground0 on a Cardputer Zero](demo-device.gif)
+
+The clips that follow are recorded from the simulator build, which runs the same code.
 
 ## 1. Browse: list and icon grid
 `F` / `X` move, `Z` / `C` page, `G` swaps between the list with its detail pane and the 5x2 icon grid.

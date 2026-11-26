@@ -4,6 +4,10 @@ A replacement home screen for the M5Stack **Cardputer Zero**. It runs on the sto
 
 ![Home screen, list view](ground0/docs/home.png)
 
+On the device ([video](ground0/docs/demo-device.mp4)):
+
+![Ground0 running on a Cardputer Zero](ground0/docs/demo-device.gif)
+
 ## What it does
 
 - **List and icon grid.** Six rows with a detail pane, or a 5x2 grid. `G` swaps.
