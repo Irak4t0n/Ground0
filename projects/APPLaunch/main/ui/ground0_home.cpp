@@ -7,8 +7,10 @@
 #include "ground0_home.hpp"
 
 #include "cp0_lvgl_app.h"
+#include "ground0_radio.hpp"
 #include "ground0_theme.hpp"
 #include "input_keys.h"
+#include "launcher_toast.h"
 #include "ui.h"
 
 #include <algorithm>
@@ -292,6 +294,7 @@ Ground0Home::Ground0Home(lv_obj_t *parent, IconLookup lookup)
 {
     if (!parent_) return;
     load_settings();
+    ground0::Radio::instance().poll();
     root_ = box(parent_, 0, 0, kScreenW, kScreenH, ground0::theme().desk);
     if (!root_) return;
     lv_obj_add_event_cb(root_, on_root_deleted, LV_EVENT_DELETE, this);
@@ -303,6 +306,8 @@ Ground0Home::~Ground0Home()
 {
     if (status_timer_) lv_timer_delete(status_timer_);
     status_timer_ = nullptr;
+    if (radio_timer_) lv_timer_delete(radio_timer_);
+    radio_timer_ = nullptr;
     if (root_) {
         lv_obj_remove_event_cb_with_user_data(root_, on_root_deleted, this);
         lv_obj_delete(root_);
@@ -317,6 +322,7 @@ void Ground0Home::on_root_deleted(lv_event_t *event) noexcept
     self->root_ = nullptr;
     self->clock_ = self->battery_ = self->strip_left_ = self->strip_right_ = nullptr;
     self->foot_label_ = nullptr;
+    self->radio_chip_ = self->radio_label_ = nullptr;
     self->detail_icon_ = self->detail_name_ = self->detail_sub_ = nullptr;
     self->rows_ = {};
     self->row_count_ = 0;
@@ -399,6 +405,7 @@ void Ground0Home::rebuild()
     lv_obj_clean(root_);
     clock_ = battery_ = strip_left_ = strip_right_ = nullptr;
     foot_label_ = nullptr;
+    radio_chip_ = radio_label_ = nullptr;
     detail_icon_ = detail_name_ = detail_sub_ = nullptr;
     rows_ = {};
     row_count_ = 0;
@@ -444,7 +451,7 @@ void Ground0Home::build_bar()
         for (int y = 4; y < kBarH - 4; y += 2)
             box(root_, 4, y, bar_w - 8, 1, t.bar_b);
         box(root_, title_x - 5, 1, title_w + 10, kBarH - 2, t.bar);        // clear behind the title
-        box(root_, kScreenW - 88, 1, 84, kBarH - 2, t.bar);                // and behind the status text
+        box(root_, kScreenW - 128, 1, 124, kBarH - 2, t.bar);              // and behind the status area
     }
     if (t.bevel) {
         bevel_edge(root_, 0, 0, bar_w, kBarH, true);
@@ -470,6 +477,76 @@ void Ground0Home::build_bar()
     const int status_y = centred(kBarH, status);
     clock_ = text(root_, kScreenW - 44, status_y, 38, status, status_color, "--:--", LV_TEXT_ALIGN_RIGHT);
     battery_ = text(root_, kScreenW - 84, status_y, 38, status, status_color, "", LV_TEXT_ALIGN_RIGHT);
+
+    // Radio chip: who holds the LoRa cap. Hidden when no mesh daemon is installed.
+    status_color_ = status_color;
+    const int chip_h = 13;
+    radio_chip_ = box(root_, kScreenW - 124, (kBarH - chip_h) / 2, 36, chip_h, status_color);
+    if (radio_chip_) {
+        lv_obj_set_style_radius(radio_chip_, t.radius, LV_PART_MAIN);
+        lv_obj_set_style_border_color(radio_chip_, hex(status_color), LV_PART_MAIN);
+        lv_obj_set_style_border_width(radio_chip_, 1, LV_PART_MAIN);
+        const lv_font_t *chip = load_font(t.font_bold, t.small_px >= 14 ? 12 : 9, true);
+        radio_label_ = text(radio_chip_, 0, centred(chip_h, chip) - 1, 34, chip, status_color, "",
+                            LV_TEXT_ALIGN_CENTER);
+    }
+    paint_radio();
+}
+
+void Ground0Home::paint_radio()
+{
+    if (!radio_chip_ || !radio_label_) return;
+    const ground0::RadioState state = ground0::Radio::instance().state();
+    if (state == ground0::RadioState::Absent) {
+        lv_obj_add_flag(radio_chip_, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_clear_flag(radio_chip_, LV_OBJ_FLAG_HIDDEN);
+    // MESH is a filled chip, FREE an outlined one, so they differ by more than the word.
+    const bool filled = state == ground0::RadioState::Mesh && !radio_pending_;
+    lv_obj_set_style_bg_opa(radio_chip_, filled ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
+    const uint32_t on_fill = is_dark(status_color_) ? 0xffffff : 0x000000;
+    lv_obj_set_style_text_color(radio_label_, hex(filled ? on_fill : status_color_), LV_PART_MAIN);
+    lv_label_set_text(radio_label_, radio_pending_ ? "..." : (filled ? "MESH" : "FREE"));
+}
+
+void Ground0Home::refresh_radio()
+{
+    ground0::Radio::instance().poll();
+    paint_radio();
+}
+
+void Ground0Home::toggle_radio()
+{
+    ground0::Radio &radio = ground0::Radio::instance();
+    if (radio.poll() == ground0::RadioState::Absent || radio_pending_) return;
+    radio_target_mesh_ = radio.state() != ground0::RadioState::Mesh;
+    radio.request(radio_target_mesh_);
+    radio_pending_ = true;
+    radio_polls_left_ = 14;
+    if (!radio_timer_) radio_timer_ = lv_timer_create(on_radio_timer, 700, this);
+    paint_radio();
+}
+
+void Ground0Home::on_radio_timer(lv_timer_t *timer) noexcept
+{
+    try {
+        auto *self = static_cast<Ground0Home *>(lv_timer_get_user_data(timer));
+        if (!self) return;
+        const ground0::RadioState want =
+            self->radio_target_mesh_ ? ground0::RadioState::Mesh : ground0::RadioState::Free;
+        const bool reached = ground0::Radio::instance().poll() == want;
+        if (!reached && --self->radio_polls_left_ > 0) return;
+        self->radio_pending_ = false;
+        lv_timer_delete(timer);
+        self->radio_timer_ = nullptr;
+        if (reached)
+            launcher_toast().show(self->radio_target_mesh_ ? "MeshZero on: radio in use" : "MeshZero off: radio free");
+        else
+            launcher_toast().show("Radio did not switch");
+        if (self->root_) self->paint_radio();
+    } catch (...) {
+    }
 }
 
 void Ground0Home::build_strip()
@@ -651,11 +728,14 @@ void Ground0Home::bind()
         }
     }
     if (foot_label_) {
+        const bool has_radio = ground0::Radio::instance().state() != ground0::RadioState::Absent;
         const char *hint = searching_
             ? "type to filter  Tab next  Enter open  Esc close"
             : view_ == View::Grid
-                ? "F/X/Z/C move  Enter open  Space search  G list  T theme"
-                : "F/X move  Z/C page  Enter  Space search  G grid  T theme";
+                ? (has_radio ? "F/X/Z/C move  Enter  Space find  G list  T theme  M radio"
+                             : "F/X/Z/C move  Enter open  Space search  G list  T theme")
+                : (has_radio ? "F/X move  Z/C page  Space find  G grid  T theme  M radio"
+                             : "F/X move  Z/C page  Enter  Space search  G grid  T theme");
         lv_label_set_text(foot_label_, hint);
     }
 }
@@ -721,6 +801,7 @@ void Ground0Home::bind_grid()
 
 void Ground0Home::update_status()
 {
+    if (!radio_pending_) refresh_radio();
     if (clock_) {
         char buffer[8] = "--:--";
         const std::time_t now = std::time(nullptr);
@@ -784,6 +865,10 @@ Ground0Home::Action Ground0Home::handle_key(const struct key_item &item)
         searching_ = true;
         query_.clear();
         refilter(keep);
+        return Action::Handled;
+    }
+    if (code == KEY_M) {
+        toggle_radio();
         return Action::Handled;
     }
     if (code == KEY_G) {

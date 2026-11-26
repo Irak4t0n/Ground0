@@ -49,6 +49,8 @@ public:
     std::size_t selected() const;
     bool searching() const { return searching_; }
     Action handle_key(const struct key_item &item);
+    // Re-read who holds the LoRa radio and repaint the status-bar chip.
+    void refresh_radio();
 
 private:
     static constexpr int kListRows = 6;
@@ -75,6 +77,8 @@ private:
     void bind_list();
     void bind_grid();
     void update_status();
+    void paint_radio();
+    void toggle_radio();
     void move(int delta);
     void refilter(std::size_t keep_item);
     Action handle_search_key(const struct key_item &item);
@@ -83,6 +87,7 @@ private:
 
     static void on_root_deleted(lv_event_t *event) noexcept;
     static void on_status_timer(lv_timer_t *timer) noexcept;
+    static void on_radio_timer(lv_timer_t *timer) noexcept;
 
     lv_obj_t *parent_ = nullptr;
     lv_obj_t *root_ = nullptr;
@@ -91,6 +96,13 @@ private:
     lv_obj_t *strip_left_ = nullptr;
     lv_obj_t *strip_right_ = nullptr;
     lv_obj_t *foot_label_ = nullptr;
+    lv_obj_t *radio_chip_ = nullptr;
+    lv_obj_t *radio_label_ = nullptr;
+    lv_timer_t *radio_timer_ = nullptr;
+    uint32_t status_color_ = 0;
+    int radio_polls_left_ = 0;
+    bool radio_pending_ = false;
+    bool radio_target_mesh_ = false;
     lv_obj_t *detail_icon_ = nullptr;
     lv_obj_t *detail_name_ = nullptr;
     lv_obj_t *detail_sub_ = nullptr;

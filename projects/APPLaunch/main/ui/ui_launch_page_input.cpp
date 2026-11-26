@@ -6,6 +6,12 @@
 
 #include "ui_launch_page.h"
 
+#include "ground0_radio.hpp"
+#include "launch.h"
+#include "ui_loading.h"
+
+#include <chrono>
+
 #include "hal_lvgl_bsp.h"
 #include "input_keys.h"
 #include "keyboard_input.h"
@@ -79,7 +85,33 @@ void UILaunchPage::handle_home_key(lv_event_t *event)
         if (ground0_->handle_key(*elm) == Ground0Home::Action::Launch && launch_) {
             launch_->select_app(ground0_->selected());
             audio_play_enter();
+
+            // Hand the LoRa radio over if this app needs the mesh daemon stopped
+            // (or running), and give it back when the app exits.
+            ground0::Radio &radio = ground0::Radio::instance();
+            const app *entry = launch_->app_at(ground0_->selected());
+            const auto need = entry ? radio.need_for(entry->Name, entry->Exec) : ground0::Radio::Need::None;
+            bool restore_mesh = false;
+            if (need != ground0::Radio::Need::None && radio.poll() != ground0::RadioState::Absent) {
+                const bool want_mesh = need == ground0::Radio::Need::Mesh;
+                if ((radio.state() == ground0::RadioState::Mesh) != want_mesh) {
+                    ui_loading::show(want_mesh ? "Starting MeshZero..." : "Freeing LoRa radio...");
+                    lv_refr_now(nullptr);
+                    radio.set_blocking(want_mesh);
+                    ui_loading::hide();
+                    restore_mesh = !want_mesh && radio.restore_after_app();
+                }
+            }
+
+            const auto started = std::chrono::steady_clock::now();
             launch_selected_app();
+            // An external app blocks until it exits. A call that returns at once
+            // opened a built-in page or terminal instead, which is still running,
+            // so the radio stays as it is.
+            const bool app_has_exited =
+                std::chrono::steady_clock::now() - started > std::chrono::seconds(2);
+            if (restore_mesh && app_has_exited) radio.request(true);
+            if (ground0_ && ground0_->valid()) ground0_->refresh_radio();
         }
         return;
     }
