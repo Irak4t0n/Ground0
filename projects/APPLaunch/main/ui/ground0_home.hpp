@@ -35,6 +35,7 @@ public:
 
     enum class Action { None, Handled, Launch };
     enum class View { List, Grid };
+    enum class Tab { Favs, All, Recent };
 
     Ground0Home(lv_obj_t *parent, IconLookup lookup);
     ~Ground0Home();
@@ -63,6 +64,7 @@ private:
         lv_obj_t *box = nullptr;
         lv_obj_t *name = nullptr;
         lv_obj_t *icon = nullptr;
+        lv_obj_t *mark = nullptr;   // favourite marker
     };
 
     void load_settings();
@@ -81,6 +83,10 @@ private:
     void toggle_radio();
     void move(int delta);
     void refilter(std::size_t keep_item);
+    void switch_tab(int step);
+    void toggle_favorite();
+    void note_launch();
+    bool is_favorite(const std::string &name) const;
     Action handle_search_key(const struct key_item &item);
     void set_icon(lv_obj_t *image, const std::string &path, uint32_t size);
     std::size_t page_size() const;
@@ -116,6 +122,9 @@ private:
     std::size_t selected_ = 0;   // position in visible_
     std::size_t first_ = 0;      // first shown position (list) or page start (grid)
     bool searching_ = false;
+    Tab tab_ = Tab::All;
+    std::vector<std::string> favorites_;   // app names
+    std::vector<std::string> recents_;     // app names, newest first
     std::string query_;
     View view_ = View::List;
 };

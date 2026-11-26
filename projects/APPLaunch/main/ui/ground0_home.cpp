@@ -265,6 +265,31 @@ void config_set_str(const char *key, const std::string &value)
     cp0_signal_config_api({"Save"}, [](int, std::string) {});
 }
 
+// Lists are stored as one config string, entries separated by '|'.
+std::vector<std::string> split_list(const std::string &text)
+{
+    std::vector<std::string> out;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t end = text.find('|', start);
+        const std::string entry = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!entry.empty()) out.push_back(entry);
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return out;
+}
+
+std::string join_list(const std::vector<std::string> &list)
+{
+    std::string out;
+    for (const std::string &entry : list) {
+        if (!out.empty()) out += '|';
+        out += entry;
+    }
+    return out;
+}
+
 std::string lower(const std::string &value)
 {
     std::string out = value;
@@ -342,12 +367,19 @@ void Ground0Home::load_settings()
     const int index = ground0::theme_from_id(config_get_str("ground0_theme", "chromeshore").c_str());
     ground0::set_theme(index < 0 ? 0 : index);
     view_ = config_get_str("ground0_view", "list") == "grid" ? View::Grid : View::List;
+    const std::string tab = config_get_str("ground0_tab", "all");
+    tab_ = tab == "favs" ? Tab::Favs : tab == "recent" ? Tab::Recent : Tab::All;
+    favorites_ = split_list(config_get_str("ground0_favs", ""));
+    recents_ = split_list(config_get_str("ground0_recent", ""));
 }
 
 void Ground0Home::save_settings()
 {
     config_set_str("ground0_theme", ground0::theme().id);
     config_set_str("ground0_view", view_ == View::Grid ? "grid" : "list");
+    config_set_str("ground0_tab", tab_ == Tab::Favs ? "favs" : tab_ == Tab::Recent ? "recent" : "all");
+    config_set_str("ground0_favs", join_list(favorites_));
+    config_set_str("ground0_recent", join_list(recents_));
 }
 
 std::size_t Ground0Home::page_size() const
@@ -379,7 +411,15 @@ void Ground0Home::refilter(std::size_t keep_item)
     std::vector<std::pair<int, std::size_t>> ranked;
     ranked.reserve(items_.size());
     for (std::size_t i = 0; i < items_.size(); ++i) {
-        const int rank = searching_ ? match_rank(lower(items_[i].name), query) : 0;
+        int rank = 0;
+        if (searching_) {
+            rank = match_rank(lower(items_[i].name), query);   // search always covers every app
+        } else if (tab_ == Tab::Favs) {
+            rank = is_favorite(items_[i].name) ? 0 : -1;
+        } else if (tab_ == Tab::Recent) {
+            const auto found = std::find(recents_.begin(), recents_.end(), items_[i].name);
+            rank = found == recents_.end() ? -1 : static_cast<int>(found - recents_.begin());
+        }
         if (rank >= 0) ranked.emplace_back(rank, i);
     }
     // Stable: equal ranks keep the launcher's own app order.
@@ -583,7 +623,8 @@ void Ground0Home::build_list()
         lv_obj_set_style_radius(row.box, t.radius, LV_PART_MAIN);
         lv_obj_set_style_border_color(row.box, hex(t.accent), LV_PART_MAIN);
         lv_obj_set_style_border_width(row.box, outline ? 1 : 0, LV_PART_MAIN);
-        row.name = text(row.box, 6, centred(kRowH, name_font), kListW - kRowIcon - 18, name_font, t.text, "");
+        row.name = text(row.box, 8, centred(kRowH, name_font), kListW - kRowIcon - 20, name_font, t.text, "");
+        row.mark = box(row.box, 2, kRowH / 2 - 2, 3, 4, t.accent2);
         row.icon = lv_image_create(row.box);
         if (row.icon) {
             lv_obj_set_pos(row.icon, kListW - kRowIcon - 7, (kRowH - kRowIcon) / 2);
@@ -708,9 +749,13 @@ void Ground0Home::bind()
         if (searching_)
             std::snprintf(buffer, sizeof(buffer), "> %s_", query_.c_str());
         else if (count == 0)
-            std::snprintf(buffer, sizeof(buffer), "No apps");
+            std::snprintf(buffer, sizeof(buffer), "%s", tab_ == Tab::Favs ? "Favs: none yet, V adds one"
+                                                      : tab_ == Tab::Recent ? "Recent: nothing opened yet"
+                                                                            : "No apps");
         else
-            std::snprintf(buffer, sizeof(buffer), "All apps  %zu of %zu", selected_ + 1, count);
+            std::snprintf(buffer, sizeof(buffer), "%s  %zu of %zu",
+                          tab_ == Tab::Favs ? "Favs" : tab_ == Tab::Recent ? "Recent" : "All apps",
+                          selected_ + 1, count);
         lv_label_set_text(strip_left_, buffer);
         // Search text takes the accent colour where that reads against the strip.
         const bool accent_reads = reads_on(t.accent, t.strip);
@@ -732,10 +777,10 @@ void Ground0Home::bind()
         const char *hint = searching_
             ? "type to filter  Tab next  Enter open  Esc close"
             : view_ == View::Grid
-                ? (has_radio ? "F/X/Z/C move  Enter  Space find  G list  T theme  M radio"
-                             : "F/X/Z/C move  Enter open  Space search  G list  T theme")
-                : (has_radio ? "F/X move  Z/C page  Space find  G grid  T theme  M radio"
-                             : "F/X move  Z/C page  Enter  Space search  G grid  T theme");
+                ? (has_radio ? "Tab lists  V fav  Space find  G list  T theme  M radio"
+                             : "F/X/Z/C move  Tab lists  V fav  Space find  G list  T theme")
+                : (has_radio ? "Tab lists  V fav  Space find  G grid  T theme  M radio"
+                             : "F/X move  Tab lists  V fav  Space find  G grid  T theme");
         lv_label_set_text(foot_label_, hint);
     }
 }
@@ -759,6 +804,12 @@ void Ground0Home::bind_list()
         if (row.name) {
             lv_label_set_text(row.name, items_[index].name.c_str());
             lv_obj_set_style_text_color(row.name, hex(on ? t.sel_text : t.text), LV_PART_MAIN);
+        }
+        if (row.mark) {
+            if (is_favorite(items_[index].name))
+                lv_obj_clear_flag(row.mark, LV_OBJ_FLAG_HIDDEN);
+            else
+                lv_obj_add_flag(row.mark, LV_OBJ_FLAG_HIDDEN);
         }
         set_icon(row.icon, items_[index].icon, kRowIcon);
     }
@@ -838,8 +889,11 @@ Ground0Home::Action Ground0Home::handle_key(const struct key_item &item)
 
     const uint32_t code = item.semantic_key ? item.semantic_key : item.key_code;
 
-    if (item.key_state == KBD_KEY_RELEASED)
-        return code == KEY_ENTER && !visible_.empty() ? Action::Launch : Action::None;
+    if (item.key_state == KBD_KEY_RELEASED) {
+        if (code != KEY_ENTER || visible_.empty()) return Action::None;
+        note_launch();
+        return Action::Launch;
+    }
 
     const bool grid = view_ == View::Grid;
     switch (code) {
@@ -865,6 +919,14 @@ Ground0Home::Action Ground0Home::handle_key(const struct key_item &item)
         searching_ = true;
         query_.clear();
         refilter(keep);
+        return Action::Handled;
+    }
+    if (code == KEY_TAB) {
+        switch_tab((item.mods & KBD_MOD_SHIFT) ? -1 : 1);
+        return Action::Handled;
+    }
+    if (code == KEY_V) {
+        toggle_favorite();
         return Action::Handled;
     }
     if (code == KEY_M) {
@@ -899,6 +961,7 @@ Ground0Home::Action Ground0Home::handle_search_key(const struct key_item &item)
         if (code != KEY_ENTER || visible_.empty()) return Action::None;
         // Leave search with the chosen app selected, then let the owner launch it.
         const std::size_t chosen = selected();
+        note_launch();
         searching_ = false;
         query_.clear();
         refilter(chosen);
@@ -940,4 +1003,52 @@ Ground0Home::Action Ground0Home::handle_search_key(const struct key_item &item)
         return Action::Handled;
     }
     return Action::Handled;
+}
+
+bool Ground0Home::is_favorite(const std::string &name) const
+{
+    return std::find(favorites_.begin(), favorites_.end(), name) != favorites_.end();
+}
+
+void Ground0Home::switch_tab(int step)
+{
+    const std::size_t keep = selected();
+    const int next = ((static_cast<int>(tab_) + step) % 3 + 3) % 3;
+    tab_ = static_cast<Tab>(next);
+    save_settings();
+    refilter(keep);
+}
+
+void Ground0Home::toggle_favorite()
+{
+    if (selected_ >= visible_.size()) return;
+    const std::size_t item = visible_[selected_];
+    const std::string &name = items_[item].name;
+    const auto found = std::find(favorites_.begin(), favorites_.end(), name);
+    if (found == favorites_.end()) {
+        favorites_.push_back(name);
+        launcher_toast().show("Added to Favs");
+    } else {
+        favorites_.erase(found);
+        launcher_toast().show("Removed from Favs");
+    }
+    save_settings();
+    const std::size_t position = selected_;
+    refilter(item);
+    // Removing from the Favs list drops the row: stay near where the cursor was.
+    if (tab_ == Tab::Favs && !visible_.empty() &&
+        std::find(visible_.begin(), visible_.end(), item) == visible_.end()) {
+        selected_ = std::min(position, visible_.size() - 1);
+        bind();
+    }
+}
+
+void Ground0Home::note_launch()
+{
+    if (selected_ >= visible_.size()) return;
+    const std::string name = items_[visible_[selected_]].name;
+    recents_.erase(std::remove(recents_.begin(), recents_.end(), name), recents_.end());
+    recents_.insert(recents_.begin(), name);
+    if (recents_.size() > 12) recents_.resize(12);
+    save_settings();
 }
