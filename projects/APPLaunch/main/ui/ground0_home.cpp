@@ -204,7 +204,7 @@ void draw_art(lv_obj_t *body, int width, int height)
     const ground0::Theme &t = ground0::theme();
     if (t.art == ground0::Art::Signal) {
         // Signal rings around a beacon: arcs opening left and right.
-        const int cx = width - 62, cy = height / 2;
+        const int cx = width / 2, cy = height / 2;
         for (int i = 1; i <= 3; ++i) {
             const int r = 12 + i * 14;
             lv_obj_t *arc = lv_arc_create(body);
@@ -237,21 +237,8 @@ void draw_art(lv_obj_t *body, int width, int height)
         lv_obj_t *beacon = faint(body, cx - 5, cy - 5, 10, 10, t.accent2, LV_OPA_40);
         if (beacon) lv_obj_set_style_radius(beacon, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     } else if (t.art == ground0::Art::Radar) {
-        // Data rain: broken vertical streaks.
-        static const int kColumns[] = {12, 30, 52, 70, 96, 118, 140, 166};
-        int seed = 7;
-        for (int x : kColumns) {
-            if (x >= width) break;
-            int y = (seed * 13) % 17;
-            while (y < height) {
-                const int len = 4 + (seed * 7) % 13;
-                faint(body, x, y, 1, std::min(len, height - y), t.accent, LV_OPA_30);
-                y += len + 5 + (seed * 5) % 9;
-                seed = (seed * 31 + 11) % 97;
-            }
-        }
         // Radar scope with crosshair and two blips.
-        const int cx = width - 62, cy = height / 2;
+        const int cx = width / 2, cy = height / 2;
         for (int r : {18, 36, 54})
             ring(body, cx, cy, r, t.accent, LV_OPA_30);
         faint(body, cx - 54, cy, 108, 1, t.accent, LV_OPA_20);

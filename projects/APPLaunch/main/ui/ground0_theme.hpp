@@ -27,7 +27,7 @@ enum class Fill : uint8_t {
 enum class Art : uint8_t {
     None,
     Signal,    // signal rings around a beacon
-    Radar,     // radar sweep with data-rain columns
+    Radar,     // radar scope with crosshair and blips
 };
 
 struct Theme
