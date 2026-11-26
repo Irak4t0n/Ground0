@@ -24,6 +24,8 @@ A replacement home screen for the M5Stack **Cardputer Zero**. It runs on the sto
 
 ![All 24 themes](ground0/docs/themes.png)
 
+**[Feature tour with a clip of every feature](ground0/docs/SHOWCASE.md)** · [all clips as one video](ground0/docs/showcase.mp4)
+
 ## Keys
 
 The Cardputer Zero has no arrow keys; in the launcher `F` `X` `Z` `C` act as up, down, left, right.
@@ -122,4 +124,6 @@ The classic skin names are trademarks of their owners and are used only to descr
 
 ## Licence
 
-MIT, the same as the upstream launcher. See [LICENSE](LICENSE).
+Ground0's source code is MIT, the same as the upstream launcher ([LICENSE](LICENSE)).
+
+The **compiled** launcher links one GPL-3.0-only component from upstream (tree.hh), so the binary package is distributed under the GNU GPL version 3, with this repository as its source. The full picture, including the 1999 Online skins and the fonts, is in [ground0/NOTICE.md](ground0/NOTICE.md).

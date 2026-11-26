@@ -355,9 +355,7 @@ void UILaunchPage::create_app_container(lv_obj_t *parent)
     if (!ground0_ || !ground0_->valid()) {
         ground0_ = std::make_unique<Ground0Home>(
             top_container(), [this](const std::string &path, uint32_t size) -> const lv_image_dsc_t * {
-                const lv_image_dsc_t *icon = home_icon_pool_.find(path, size);
-                // The pool answers with a 100 px icon when it cannot resize one.
-                return icon && icon->header.w == size ? icon : nullptr;
+                return home_icon_pool_.find_on_demand(path, size);
             });
     }
     sync_ground0();

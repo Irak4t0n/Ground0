@@ -1,0 +1,61 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Ground0
+Source: https://github.com/Irak4t0n/Ground0
+Comment:
+ The compiled launcher in this package links tree.hh (GPL-3.0-only), so the
+ binary is distributed under the GNU General Public License version 3. The
+ complete corresponding source is the repository above at the tag matching
+ this package's version. Source files keep the licences listed below.
+ Full licence texts are in /usr/share/doc/ground0/licenses/.
+
+Files: *
+Copyright: 2026 M5Stack Technology CO LTD
+           2026 Irak4t0n
+License: MIT
+
+Files: usr/share/APPLaunch/bin/M5CardputerZero-APPLaunch
+Copyright: 2026 M5Stack Technology CO LTD
+           2026 Irak4t0n
+           2001-2024 Kasper Peeters (tree.hh)
+           LVGL Kft (LVGL), Lode Vandevenne (LodePNG), Wang Qi (eventpp),
+           Pierre-Antoine Lacaze (sigslot), David Reid (miniaudio)
+License: GPL-3
+Comment:
+ Combined work. Components: MIT (M5Stack launcher, Ground0, LVGL, sigslot),
+ zlib (LodePNG), Apache-2.0 (eventpp), Unlicense or MIT-0 (miniaudio),
+ GPL-3.0-only (tree.hh). The fourteen classic skins are adapted from 1999
+ Online by GoatsAndMonkeys (GPL-3.0), used with the author's permission.
+
+Files: usr/share/ground0/fonts/*
+Copyright: The VT323, Press Start 2P, Chakra Petch, Orbitron, Share Tech Mono
+           and Saira Stencil One project authors
+License: OFL-1.1
+Comment: Each font's licence text is installed beside it.
+
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in all
+ copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ SOFTWARE.
+
+License: GPL-3
+ On Debian systems the full text of the GNU General Public License version 3
+ is in /usr/share/common-licenses/GPL-3. A copy is also installed as
+ /usr/share/doc/ground0/licenses/tree.hh-GPL-3.0-only.txt.
+
+License: OFL-1.1
+ SIL Open Font License 1.1. The full text is installed beside each font in
+ /usr/share/ground0/fonts/.

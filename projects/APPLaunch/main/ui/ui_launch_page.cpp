@@ -321,7 +321,8 @@ void UILaunchPage::reload_home_icons(const std::vector<std::string> &icon_paths)
 {
     if (ground0_) ground0_->release_icons();
     HomeIconBufferPool replacement;
-    replacement.rebuild(icon_paths);
+    // Ground0 shows a few small icons at a time: decode them when they are shown.
+    replacement.rebuild_on_demand(icon_paths);
     home_icon_pool_.swap(replacement);
 
     // Keep the old pool alive until every image widget no longer references it.

@@ -127,6 +127,7 @@ void HomeIconBufferPool::swap(HomeIconBufferPool &other) noexcept
 {
     icons_.swap(other.icons_);
     resized_icons_.swap(other.resized_icons_);
+    known_paths_.swap(other.known_paths_);
 }
 
 HomeIconBufferPool::DrawBufferPtr
@@ -161,4 +162,28 @@ HomeIconBufferPool::decode_and_prepare(const std::string &path, uint32_t size)
 const lv_image_dsc_t *HomeIconBufferPool::as_image(const DrawBufferPtr &buffer)
 {
     return reinterpret_cast<const lv_image_dsc_t *>(buffer.get());
+}
+
+void HomeIconBufferPool::rebuild_on_demand(const std::vector<std::string> &icon_paths)
+{
+    icons_.clear();
+    resized_icons_.clear();
+    known_paths_.clear();
+    known_paths_.insert(icon_paths.begin(), icon_paths.end());
+}
+
+const lv_image_dsc_t *HomeIconBufferPool::find_on_demand(const std::string &path, uint32_t size)
+{
+    if (size == 0 || known_paths_.find(path) == known_paths_.end())
+        return nullptr;
+    const std::string key = path + "\n" + std::to_string(size);
+    const auto cached = resized_icons_.find(key);
+    if (cached != resized_icons_.end())
+        return as_image(cached->second);
+    DrawBufferPtr icon = decode_and_prepare(path, size);
+    if (!icon)
+        return nullptr;
+    const lv_image_dsc_t *result = as_image(icon);
+    resized_icons_.emplace(key, std::move(icon));
+    return result;
 }

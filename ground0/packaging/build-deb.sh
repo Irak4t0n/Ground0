@@ -18,7 +18,15 @@ install -D -m 0644 "$SHARE/ground0/ground0-helper.py" "$ROOT/usr/share/ground0/g
 mkdir -p "$ROOT/usr/share/ground0/fonts" "$ROOT/usr/share/doc/ground0" "$ROOT/DEBIAN"
 cp "$SHARE"/font/ground0/* "$ROOT/usr/share/ground0/fonts/"
 chmod 0644 "$ROOT"/usr/share/ground0/fonts/*
-cp "$HERE/../../LICENSE" "$ROOT/usr/share/doc/ground0/copyright" 2>/dev/null || true
+install -m 0644 "$HERE/copyright" "$ROOT/usr/share/doc/ground0/copyright"
+install -m 0644 "$HERE/../NOTICE.md" "$ROOT/usr/share/doc/ground0/NOTICE.md"
+mkdir -p "$ROOT/usr/share/doc/ground0/licenses"
+for f in M5Stack-SDK-MIT.txt LVGL-MIT.txt eventpp-Apache-2.0.txt tree.hh-GPL-3.0-only.txt; do
+    install -m 0644 "$HERE/../../LICENSES/$f" "$ROOT/usr/share/doc/ground0/licenses/$f"
+done
+install -m 0644 "$HERE/../../LICENSE" "$ROOT/usr/share/doc/ground0/licenses/launcher-MIT.txt"
+install -m 0644 "$HERE/../../ext_components/Sigslot/LICENSE" "$ROOT/usr/share/doc/ground0/licenses/sigslot-MIT.txt"
+install -m 0644 "$HERE/../../ext_components/Miniaudio/LICENSE" "$ROOT/usr/share/doc/ground0/licenses/miniaudio.txt"
 sed "s/@VERSION@/$VERSION/" "$HERE/debian/control.in" > "$ROOT/DEBIAN/control"
 echo "Installed-Size: $(du -sk "$ROOT/usr" | cut -f1)" >> "$ROOT/DEBIAN/control"
 echo "/etc/sudoers.d/ground0" > "$ROOT/DEBIAN/conffiles"
