@@ -100,6 +100,7 @@ void UILaunchPage::handle_home_key(lv_event_t *event)
                     radio.set_blocking(want_mesh);
                     ui_loading::hide();
                     restore_mesh = !want_mesh && radio.restore_after_app();
+                    if (restore_mesh) radio.set_owed(true);
                 }
             }
 
@@ -111,7 +112,10 @@ void UILaunchPage::handle_home_key(lv_event_t *event)
             const bool app_has_exited =
                 std::chrono::steady_clock::now() - started > std::chrono::seconds(2);
             const bool restoring = restore_mesh && app_has_exited;
-            if (restoring) radio.request(true);
+            if (restoring) {
+                radio.request(true);
+                radio.set_owed(false);
+            }
             if (ground0_ && ground0_->valid()) {
                 // The daemon takes a moment to come up: show it as pending, not FREE.
                 if (restoring)

@@ -16,6 +16,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include "ground0_system.hpp"
+
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -113,6 +115,16 @@ private:
     static void on_status_timer(lv_timer_t *timer) noexcept;
     static void on_radio_timer(lv_timer_t *timer) noexcept;
     static void on_update_timer(lv_timer_t *timer) noexcept;
+    static void on_quick_timer(lv_timer_t *timer) noexcept;
+
+    // Quick panel: radio, HDMI desk, lean boot, Wi-Fi.
+    void open_quick();
+    void close_quick();
+    void build_quick();
+    void paint_quick();
+    void read_quick(bool slow);
+    void act_quick();
+    Action handle_quick_key(const struct key_item &item);
 
     lv_obj_t *parent_ = nullptr;
     lv_obj_t *root_ = nullptr;
@@ -122,6 +134,20 @@ private:
     lv_obj_t *strip_right_ = nullptr;
     lv_obj_t *foot_label_ = nullptr;
     lv_obj_t *chip_label_ = nullptr;
+
+    static constexpr int kQuickRows = 6;
+    lv_obj_t *quick_panel_ = nullptr;
+    lv_obj_t *quick_row_[kQuickRows] = {};
+    lv_obj_t *quick_name_[kQuickRows] = {};
+    lv_obj_t *quick_value_[kQuickRows] = {};
+    lv_timer_t *quick_timer_ = nullptr;
+    bool quick_open_ = false;
+    int quick_selected_ = 0;
+    int quick_slow_in_ = 0;         // ticks until lean boot and Wi-Fi are read again
+    ground0::DeskState desk_;
+    ground0::Switch lean_ = ground0::Switch::Unknown;
+    ground0::WifiState wifi_;
+    bool keyboard_away_ = false;    // the keyboard is typing on the HDMI desktop
     lv_obj_t *radio_chip_ = nullptr;
     lv_obj_t *radio_label_ = nullptr;
     lv_timer_t *radio_timer_ = nullptr;

@@ -353,6 +353,15 @@ Ground0Home::Ground0Home(lv_obj_t *parent, IconLookup lookup)
     rebuild_tabs(saved_tab_);
     rebuild();
     request_index();
+    // A free-radio app was still open when Ground0 last stopped: give the radio back now.
+    ground0::Radio &radio = ground0::Radio::instance();
+    if (radio.owed()) {
+        radio.set_owed(false);
+        if (radio.poll() == ground0::RadioState::Free) {
+            radio.request(true);
+            expect_radio(true);
+        }
+    }
 }
 
 Ground0Home::~Ground0Home()
@@ -363,6 +372,8 @@ Ground0Home::~Ground0Home()
     radio_timer_ = nullptr;
     if (update_timer_) lv_timer_delete(update_timer_);
     update_timer_ = nullptr;
+    if (quick_timer_) lv_timer_delete(quick_timer_);
+    quick_timer_ = nullptr;
     if (root_) {
         lv_obj_remove_event_cb_with_user_data(root_, on_root_deleted, this);
         lv_obj_delete(root_);
@@ -378,6 +389,7 @@ void Ground0Home::on_root_deleted(lv_event_t *event) noexcept
     self->clock_ = self->battery_ = self->strip_left_ = self->strip_right_ = nullptr;
     self->foot_label_ = nullptr;
     self->chip_label_ = nullptr;
+    self->quick_panel_ = nullptr;
     self->radio_chip_ = self->radio_label_ = nullptr;
     self->detail_icon_ = self->detail_name_ = self->detail_sub_ = nullptr;
     self->rows_ = {};
@@ -493,6 +505,7 @@ void Ground0Home::rebuild()
     clock_ = battery_ = strip_left_ = strip_right_ = nullptr;
     foot_label_ = nullptr;
     chip_label_ = nullptr;
+    quick_panel_ = nullptr;
     radio_chip_ = radio_label_ = nullptr;
     detail_icon_ = detail_name_ = detail_sub_ = nullptr;
     rows_ = {};
@@ -508,6 +521,7 @@ void Ground0Home::rebuild()
     build_footer();
     update_status();
     bind();
+    if (quick_open_) build_quick();
 }
 
 void Ground0Home::build_bar()
@@ -839,14 +853,11 @@ void Ground0Home::bind()
     if (chip_label_)
         lv_label_set_text(chip_label_, tab_kind() == TabKind::Updates && !searching_ ? "Enter update" : "Enter open");
     if (foot_label_) {
-        const bool has_radio = ground0::Radio::instance().state() != ground0::RadioState::Absent;
         const char *hint = searching_
             ? "type to filter  Tab next  Enter open  Esc close"
             : view_ == View::Grid
-                ? (has_radio ? "Tab lists  V fav  Space find  G list  T theme  M radio"
-                             : "F/X/Z/C move  Tab lists  V fav  Space find  G list  T theme")
-                : (has_radio ? "Tab lists  V fav  Space find  G grid  T theme  M radio"
-                             : "F/X move  Tab lists  V fav  Space find  G grid  T theme");
+                ? "Tab lists  V fav  Space find  G list  T theme  Q quick"
+                : "Tab lists  V fav  Space find  G grid  T theme  Q quick";
         lv_label_set_text(foot_label_, hint);
     }
 }
@@ -930,6 +941,14 @@ void Ground0Home::bind_grid()
 
 void Ground0Home::update_status()
 {
+    // While the keyboard types on the HDMI desktop, the Desk Mode daemon owns
+    // the built-in screen for its notice: draw nothing until the keyboard is back.
+    const bool away = ground0::desk_state().keyboard_away;
+    if (away != keyboard_away_) {
+        keyboard_away_ = away;
+        if (!away && root_) lv_obj_invalidate(root_);
+    }
+    if (keyboard_away_) return;
     if (!radio_pending_) refresh_radio();
     if (!updating_ && file_stamp(cache_path("index.tsv")) != index_stamp_) apply_index();
     if (clock_) {
@@ -965,6 +984,7 @@ Ground0Home::Action Ground0Home::handle_key(const struct key_item &item)
 {
     if (!root_) return Action::None;
     if (updating_) return Action::Handled;   // an update is running: keys wait
+    if (quick_open_) return handle_quick_key(item);
     if (searching_) return handle_search_key(item);
 
     const uint32_t code = item.semantic_key ? item.semantic_key : item.key_code;
@@ -1029,6 +1049,10 @@ Ground0Home::Action Ground0Home::handle_key(const struct key_item &item)
     }
     if (code == KEY_M) {
         toggle_radio();
+        return Action::Handled;
+    }
+    if (code == KEY_Q) {
+        open_quick();
         return Action::Handled;
     }
     if (code == KEY_G) {
@@ -1251,6 +1275,8 @@ void Ground0Home::finish_update(const std::string &message)
     updating_ = false;
     if (update_timer_) lv_timer_delete(update_timer_);
     update_timer_ = nullptr;
+    if (quick_timer_) lv_timer_delete(quick_timer_);
+    quick_timer_ = nullptr;
     launcher_toast().show(message.c_str());
     if (root_) apply_index();
 }
@@ -1273,6 +1299,223 @@ void Ground0Home::on_update_timer(lv_timer_t *timer) noexcept
         } else if (last.rfind("STATUS ", 0) == 0) {
             launcher_toast().show_persistent(last.substr(7).c_str());
         }
+    } catch (...) {
+    }
+}
+
+// ---------------------------------------------------------------- quick panel
+
+namespace {
+constexpr int kQuickW = 264;
+constexpr int kQuickRowH = 19;
+constexpr int kQuickHead = 19;
+const char *const kQuickNames[] = {"Radio", "HDMI desktop", "Keyboard", "HDMI on plug-in", "Lean boot", "Wi-Fi"};
+enum QuickRow { kQuickRadio, kQuickDesktop, kQuickKeyboard, kQuickAutostart, kQuickLean, kQuickWifi };
+}
+
+void Ground0Home::open_quick()
+{
+    if (quick_open_ || !root_) return;
+    quick_open_ = true;
+    read_quick(true);
+    build_quick();
+    if (!quick_timer_) quick_timer_ = lv_timer_create(on_quick_timer, 1000, this);
+}
+
+void Ground0Home::close_quick()
+{
+    quick_open_ = false;
+    if (quick_timer_) lv_timer_delete(quick_timer_);
+    quick_timer_ = nullptr;
+    if (quick_panel_) lv_obj_delete(quick_panel_);
+    quick_panel_ = nullptr;
+}
+
+// Lean boot and Wi-Fi each cost a process start, so they are read only when
+// the panel opens and shortly after one of them is switched.
+void Ground0Home::read_quick(bool slow)
+{
+    desk_ = ground0::desk_state();
+    if (slow) {
+        lean_ = ground0::lean_boot();
+        wifi_ = ground0::wifi_state();
+    }
+}
+
+void Ground0Home::build_quick()
+{
+    const ground0::Theme &t = ground0::theme();
+    const int height = kQuickHead + kQuickRows * kQuickRowH + 5;
+    quick_panel_ = box(root_, (kScreenW - kQuickW) / 2, (kScreenH - height) / 2 + 2, kQuickW, height, t.face);
+    if (!quick_panel_) return;
+    lv_obj_set_style_radius(quick_panel_, t.win_radius, LV_PART_MAIN);
+    lv_obj_set_style_clip_corner(quick_panel_, true, LV_PART_MAIN);
+    lv_obj_set_style_border_width(quick_panel_, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(quick_panel_, hex(t.accent), LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(quick_panel_, 10, LV_PART_MAIN);
+    lv_obj_set_style_shadow_color(quick_panel_, hex(0x000000), LV_PART_MAIN);
+    lv_obj_set_style_shadow_opa(quick_panel_, LV_OPA_60, LV_PART_MAIN);
+
+    lv_obj_t *head = box(quick_panel_, 0, 0, kQuickW, kQuickHead, t.bar);
+    if (head) {
+        gradient(head, t.bar, t.bar_b, t.bar_fill == ground0::Fill::GradH);
+        const lv_font_t *bold = chip_font();
+        const lv_font_t *small = small_font();
+        text(head, 8, centred(kQuickHead, bold), 120, bold, t.bar_text, "Quick panel");
+        text(head, kQuickW - 148, centred(kQuickHead, small), 140, small, t.bar_text, "Enter change  Q close",
+             LV_TEXT_ALIGN_RIGHT);
+    }
+    const lv_font_t *font = small_font();
+    for (int i = 0; i < kQuickRows; ++i) {
+        quick_row_[i] = box(quick_panel_, 3, kQuickHead + 2 + i * kQuickRowH, kQuickW - 8, kQuickRowH - 1, t.face);
+        if (!quick_row_[i]) continue;
+        lv_obj_set_style_radius(quick_row_[i], t.radius, LV_PART_MAIN);
+        const int y = centred(kQuickRowH - 1, font);
+        quick_name_[i] = text(quick_row_[i], 7, y, 116, font, t.text, kQuickNames[i]);
+        quick_value_[i] = text(quick_row_[i], 124, y, kQuickW - 8 - 131, font, t.text, "", LV_TEXT_ALIGN_RIGHT);
+    }
+    paint_quick();
+}
+
+void Ground0Home::paint_quick()
+{
+    if (!quick_panel_) return;
+    const ground0::Theme &t = ground0::theme();
+    const ground0::RadioState radio = ground0::Radio::instance().state();
+    std::string value[kQuickRows];
+    bool live[kQuickRows] = {};   // the switch is in its "on" position: shown in the accent colour
+
+    value[kQuickRadio] = radio == ground0::RadioState::Absent ? "no mesh daemon"
+                         : radio_pending_ ? "switching..."
+                         : radio == ground0::RadioState::Mesh ? "MESH (MeshZero)" : "FREE for apps";
+    live[kQuickRadio] = radio == ground0::RadioState::Mesh;
+
+    value[kQuickDesktop] = !desk_.installed ? "Desk Mode not installed"
+                           : desk_.desktop ? "On" : desk_.hdmi ? "Off, display ready" : "No display";
+    live[kQuickDesktop] = desk_.desktop;
+    value[kQuickKeyboard] = desk_.keyboard_away ? "HDMI display" : "Cardputer";
+    live[kQuickKeyboard] = desk_.keyboard_away;
+    value[kQuickAutostart] = !desk_.installed ? "-" : desk_.autostart ? "On" : "Off";
+    live[kQuickAutostart] = desk_.installed && desk_.autostart;
+
+    value[kQuickLean] = lean_ == ground0::Switch::On ? "On, no desktop at boot"
+                        : lean_ == ground0::Switch::Off ? "Off" : "-";
+    live[kQuickLean] = lean_ == ground0::Switch::On;
+    value[kQuickWifi] = wifi_.radio == ground0::Switch::Off ? "Off"
+                        : wifi_.radio == ground0::Switch::Unknown ? "-"
+                        : wifi_.ssid.empty() ? "On, not connected" : wifi_.ssid;
+    live[kQuickWifi] = wifi_.radio == ground0::Switch::On;
+
+    for (int i = 0; i < kQuickRows; ++i) {
+        if (!quick_row_[i]) continue;
+        const bool chosen = i == quick_selected_;
+        if (chosen) {
+            selection_fill(quick_row_[i]);
+        } else {
+            lv_obj_set_style_bg_grad_dir(quick_row_[i], LV_GRAD_DIR_NONE, LV_PART_MAIN);
+            lv_obj_set_style_bg_color(quick_row_[i], hex(t.face), LV_PART_MAIN);
+        }
+        const uint32_t ink = chosen ? t.sel_text : t.text;
+        const uint32_t on = !chosen && reads_on(t.accent, t.face) ? t.accent : ink;
+        if (quick_name_[i]) lv_obj_set_style_text_color(quick_name_[i], hex(ink), LV_PART_MAIN);
+        if (quick_value_[i]) {
+            lv_label_set_text(quick_value_[i], value[i].c_str());
+            lv_obj_set_style_text_color(quick_value_[i], hex(live[i] ? on : chosen ? ink : t.dim), LV_PART_MAIN);
+        }
+    }
+}
+
+void Ground0Home::act_quick()
+{
+    switch (quick_selected_) {
+    case kQuickRadio:
+        toggle_radio();
+        break;
+    case kQuickDesktop:
+        if (!desk_.installed) {
+            launcher_toast().show("Install Desk Mode from the Store first");
+        } else if (desk_.desktop) {
+            ground0::desk_request("desktop-stop");
+            launcher_toast().show("Closing the HDMI desktop");
+        } else if (!desk_.hdmi) {
+            launcher_toast().show("Plug in an HDMI display first");
+        } else {
+            ground0::desk_request("desktop-start");
+            launcher_toast().show("Starting the HDMI desktop");
+        }
+        break;
+    case kQuickKeyboard:
+        if (!desk_.installed) {
+            launcher_toast().show("Install Desk Mode from the Store first");
+        } else if (!desk_.desktop) {
+            launcher_toast().show("Start the HDMI desktop first");
+        } else {
+            ground0::desk_request("keyboard-desktop");
+            launcher_toast().show("Keyboard to HDMI. Ctrl+Alt+Esc brings it back");
+        }
+        break;
+    case kQuickAutostart:
+        if (!desk_.installed) {
+            launcher_toast().show("Install Desk Mode from the Store first");
+        } else {
+            const bool on = !desk_.autostart;
+            launcher_toast().show(ground0::desk_set_autostart(on)
+                                      ? (on ? "HDMI desktop starts on plug-in" : "HDMI desktop starts only when asked")
+                                      : "Could not save the setting");
+        }
+        break;
+    case kQuickLean:
+        if (lean_ == ground0::Switch::Unknown) {
+            launcher_toast().show("No background desktop on this system");
+        } else {
+            const bool on = lean_ != ground0::Switch::On;
+            ground0::set_lean_boot(on);
+            launcher_toast().show(on ? "Lean boot on: no desktop at next boot" : "Lean boot off: desktop loads at boot");
+            quick_slow_in_ = 2;
+        }
+        break;
+    case kQuickWifi:
+        if (wifi_.radio == ground0::Switch::Unknown) {
+            launcher_toast().show("Wi-Fi control is not available");
+        } else {
+            const bool on = wifi_.radio != ground0::Switch::On;
+            ground0::set_wifi(on);
+            launcher_toast().show(on ? "Wi-Fi on" : "Wi-Fi off");
+            quick_slow_in_ = on ? 5 : 2;   // joining a network takes a few seconds
+        }
+        break;
+    default:
+        break;
+    }
+    read_quick(false);
+    paint_quick();
+}
+
+Ground0Home::Action Ground0Home::handle_quick_key(const struct key_item &item)
+{
+    const uint32_t code = item.semantic_key ? item.semantic_key : item.key_code;
+    if (item.key_state == KBD_KEY_RELEASED) return Action::Handled;
+    if (code == KEY_UP || code == KEY_DOWN) {
+        quick_selected_ = (quick_selected_ + (code == KEY_UP ? kQuickRows - 1 : 1)) % kQuickRows;
+        paint_quick();
+        return Action::Handled;
+    }
+    if (item.key_state != KBD_KEY_PRESSED) return Action::Handled;
+    if (code == KEY_ENTER || code == KEY_SPACE)
+        act_quick();
+    else if (code == KEY_Q || code == KEY_ESC)
+        close_quick();
+    return Action::Handled;
+}
+
+void Ground0Home::on_quick_timer(lv_timer_t *timer) noexcept
+{
+    try {
+        auto *self = static_cast<Ground0Home *>(lv_timer_get_user_data(timer));
+        if (!self || !self->quick_panel_) return;
+        const bool slow = self->quick_slow_in_ > 0 && --self->quick_slow_in_ == 0;
+        self->read_quick(slow);
+        self->paint_quick();
     } catch (...) {
     }
 }

@@ -43,6 +43,11 @@ public:
     Need need_for(const std::string &name, const std::string &exec) const;
     bool restore_after_app() const { return restore_; }
 
+    // Ground0 stopped the daemon for an app and still has to start it again.
+    // Kept in the config so it survives Ground0 being restarted mid-app.
+    void set_owed(bool owed);
+    bool owed() const;
+
 private:
     Radio();
     bool run(bool mesh_on, bool background);

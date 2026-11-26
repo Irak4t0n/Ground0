@@ -105,6 +105,18 @@ bool Radio::run(bool mesh_on, bool background)
     return cp0_process_run_argv(argv, background ? 1 : 0) == 0;
 }
 
+void Radio::set_owed(bool owed)
+{
+    if (simulated_) return;
+    cp0_signal_config_api({"SetStr", "ground0_radio_owed", owed ? "1" : "0"}, [](int, std::string) {});
+    cp0_signal_config_api({"Save"}, [](int, std::string) {});
+}
+
+bool Radio::owed() const
+{
+    return !simulated_ && config_str("ground0_radio_owed", "0") == "1";
+}
+
 void Radio::request(bool mesh_on)
 {
     run(mesh_on, true);
