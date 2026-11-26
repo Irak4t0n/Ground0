@@ -14,9 +14,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <string>
 #include <utility>
+
+#include <unistd.h>
 
 namespace {
 
@@ -35,27 +38,44 @@ constexpr int kCellW = 64;
 constexpr int kCellH = 60;
 constexpr int kCellIcon = 36;
 
-const lv_font_t *font_or_default(lv_font_t *font)
+// Fonts live in the launcher font folder; Ground0's own are in its ground0/
+// subfolder. GROUND0_FONT_DIR points at a loose copy of that subfolder, for
+// running a test build against an installed package that does not ship them.
+std::string font_path(const char *file)
 {
+    static std::string font_dir;
+    if (font_dir.empty()) {
+        std::string known;
+        cp0_signal_filesystem_api({"Path", "JetBrainsMono-Regular.ttf"},
+                                  [&](int code, std::string data) { if (code == 0) known = std::move(data); });
+        const std::size_t slash = known.find_last_of('/');
+        font_dir = slash == std::string::npos ? "." : known.substr(0, slash);
+    }
+    const std::string name = file ? file : "";
+    if (name.rfind("ground0/", 0) == 0) {
+        if (const char *override_dir = std::getenv("GROUND0_FONT_DIR")) {
+            const std::string candidate = std::string(override_dir) + "/" + name.substr(8);
+            if (access(candidate.c_str(), R_OK) == 0) return candidate;
+        }
+    }
+    const std::string bundled = font_dir + "/" + name;
+    if (access(bundled.c_str(), R_OK) == 0) return bundled;
+    return font_dir + "/JetBrainsMono-Regular.ttf";   // a theme font is missing: stay readable
+}
+
+const lv_font_t *load_font(const char *file, uint16_t size, bool bold = false)
+{
+    lv_font_t *font = launcher_fonts().get(
+        font_path(file).c_str(), size,
+        bold ? LV_FREETYPE_FONT_STYLE_BOLD : LV_FREETYPE_FONT_STYLE_NORMAL);
     return font ? font : LV_FONT_DEFAULT;
 }
 
-const lv_font_t *text_font(uint16_t size)
-{
-    return font_or_default(launcher_fonts().get("JetBrainsMono-Regular.ttf", size));
-}
-
-const lv_font_t *bold_font(uint16_t size)
-{
-    return font_or_default(
-        launcher_fonts().get("JetBrainsMono-Bold.ttf", size, LV_FREETYPE_FONT_STYLE_BOLD));
-}
-
-const lv_font_t *logo_font()
-{
-    return font_or_default(
-        launcher_fonts().get("Montserrat-Bold.ttf", 14, LV_FREETYPE_FONT_STYLE_BOLD));
-}
+const lv_font_t *text_font()  { const auto &t = ground0::theme(); return load_font(t.font_text, t.text_px); }
+const lv_font_t *bold_font()  { const auto &t = ground0::theme(); return load_font(t.font_bold, t.text_px, true); }
+const lv_font_t *small_font() { const auto &t = ground0::theme(); return load_font(t.font_text, t.small_px); }
+const lv_font_t *chip_font()  { const auto &t = ground0::theme(); return load_font(t.font_bold, t.small_px, true); }
+const lv_font_t *logo_font()  { const auto &t = ground0::theme(); return load_font(t.font_logo, t.logo_px, true); }
 
 lv_color_t hex(uint32_t value)
 {
@@ -95,6 +115,152 @@ lv_obj_t *text(lv_obj_t *parent, int x, int y, int w, const lv_font_t *font, uin
     lv_obj_set_style_text_align(label, align, LV_PART_MAIN);
     lv_label_set_text(label, value ? value : "");
     return label;
+}
+
+// Vertical position that centres one line of `font` in a strip `height` tall.
+int centred(int height, const lv_font_t *font)
+{
+    return (height - static_cast<int>(lv_font_get_line_height(font))) / 2;
+}
+
+void gradient(lv_obj_t *obj, uint32_t a, uint32_t b, bool horizontal)
+{
+    if (!obj) return;
+    lv_obj_set_style_bg_color(obj, hex(a), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(obj, LV_OPA_COVER, LV_PART_MAIN);
+    if (a == b) {
+        lv_obj_set_style_bg_grad_dir(obj, LV_GRAD_DIR_NONE, LV_PART_MAIN);
+        return;
+    }
+    lv_obj_set_style_bg_grad_color(obj, hex(b), LV_PART_MAIN);
+    lv_obj_set_style_bg_grad_dir(obj, horizontal ? LV_GRAD_DIR_HOR : LV_GRAD_DIR_VER, LV_PART_MAIN);
+}
+
+uint32_t lighten(uint32_t color, int percent)
+{
+    auto mix = [percent](uint32_t channel) {
+        return channel + (255 - channel) * static_cast<uint32_t>(percent) / 100;
+    };
+    return (mix((color >> 16) & 0xff) << 16) | (mix((color >> 8) & 0xff) << 8) | mix(color & 0xff);
+}
+
+// Selection fill: glossy themes fade from a lighter top edge, the rest are flat.
+void selection_fill(lv_obj_t *obj)
+{
+    const ground0::Theme &t = ground0::theme();
+    gradient(obj, t.gloss ? lighten(t.sel, 35) : t.sel, t.sel, false);
+}
+
+// Two-tone 3D edge. Raised: light top-left, dark bottom-right. Sunken: the reverse.
+void bevel_edge(lv_obj_t *parent, int x, int y, int w, int h, bool raised)
+{
+    const ground0::Theme &t = ground0::theme();
+    const uint32_t top_left = raised ? t.hi : t.lo;
+    const uint32_t bottom_right = raised ? t.lo : t.hi;
+    box(parent, x, y, w, 1, top_left);
+    box(parent, x, y, 1, h, top_left);
+    box(parent, x, y + h - 1, w, 1, bottom_right);
+    box(parent, x + w - 1, y, 1, h, bottom_right);
+}
+
+// Perceived brightness, 0..255000.
+uint32_t luma(uint32_t color)
+{
+    return ((color >> 16) & 0xff) * 299 + ((color >> 8) & 0xff) * 587 + (color & 0xff) * 114;
+}
+
+bool is_dark(uint32_t color)
+{
+    return luma(color) < 128000;
+}
+
+bool reads_on(uint32_t color, uint32_t background)
+{
+    const uint32_t a = luma(color), b = luma(background);
+    return (a > b ? a - b : b - a) > 70000;
+}
+
+lv_obj_t *ring(lv_obj_t *parent, int cx, int cy, int r, uint32_t color, lv_opa_t opa)
+{
+    lv_obj_t *obj = box(parent, cx - r, cy - r, 2 * r, 2 * r, 0, false);
+    if (!obj) return nullptr;
+    lv_obj_set_style_radius(obj, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_border_width(obj, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(obj, hex(color), LV_PART_MAIN);
+    lv_obj_set_style_border_opa(obj, opa, LV_PART_MAIN);
+    return obj;
+}
+
+lv_obj_t *faint(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color, lv_opa_t opa)
+{
+    lv_obj_t *obj = box(parent, x, y, w, h, color);
+    if (obj) lv_obj_set_style_bg_opa(obj, opa, LV_PART_MAIN);
+    return obj;
+}
+
+// Faint theme art behind the list or grid. Drawn from primitives, no image.
+void draw_art(lv_obj_t *body, int width, int height)
+{
+    const ground0::Theme &t = ground0::theme();
+    if (t.art == ground0::Art::Signal) {
+        // Signal rings around a beacon: arcs opening left and right.
+        const int cx = width - 62, cy = height / 2;
+        for (int i = 1; i <= 3; ++i) {
+            const int r = 12 + i * 14;
+            lv_obj_t *arc = lv_arc_create(body);
+            if (!arc) continue;
+            lv_obj_remove_style_all(arc);
+            lv_obj_set_size(arc, 2 * r, 2 * r);
+            lv_obj_set_pos(arc, cx - r, cy - r);
+            lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
+            lv_arc_set_bg_angles(arc, 135, 225);
+            lv_obj_set_style_arc_width(arc, 3, LV_PART_MAIN);
+            lv_obj_set_style_arc_color(arc, hex(t.accent), LV_PART_MAIN);
+            lv_obj_set_style_arc_opa(arc, LV_OPA_20, LV_PART_MAIN);
+            lv_obj_set_style_arc_rounded(arc, true, LV_PART_MAIN);
+            lv_arc_set_value(arc, 0);
+            lv_obj_set_style_arc_opa(arc, LV_OPA_TRANSP, LV_PART_INDICATOR);
+
+            lv_obj_t *mirror = lv_arc_create(body);
+            if (!mirror) continue;
+            lv_obj_remove_style_all(mirror);
+            lv_obj_set_size(mirror, 2 * r, 2 * r);
+            lv_obj_set_pos(mirror, cx - r, cy - r);
+            lv_obj_clear_flag(mirror, LV_OBJ_FLAG_CLICKABLE);
+            lv_arc_set_bg_angles(mirror, 315, 45);
+            lv_obj_set_style_arc_width(mirror, 3, LV_PART_MAIN);
+            lv_obj_set_style_arc_color(mirror, hex(t.accent), LV_PART_MAIN);
+            lv_obj_set_style_arc_opa(mirror, LV_OPA_20, LV_PART_MAIN);
+            lv_obj_set_style_arc_rounded(mirror, true, LV_PART_MAIN);
+            lv_obj_set_style_arc_opa(mirror, LV_OPA_TRANSP, LV_PART_INDICATOR);
+        }
+        lv_obj_t *beacon = faint(body, cx - 5, cy - 5, 10, 10, t.accent2, LV_OPA_40);
+        if (beacon) lv_obj_set_style_radius(beacon, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    } else if (t.art == ground0::Art::Radar) {
+        // Data rain: broken vertical streaks.
+        static const int kColumns[] = {12, 30, 52, 70, 96, 118, 140, 166};
+        int seed = 7;
+        for (int x : kColumns) {
+            if (x >= width) break;
+            int y = (seed * 13) % 17;
+            while (y < height) {
+                const int len = 4 + (seed * 7) % 13;
+                faint(body, x, y, 1, std::min(len, height - y), t.accent, LV_OPA_30);
+                y += len + 5 + (seed * 5) % 9;
+                seed = (seed * 31 + 11) % 97;
+            }
+        }
+        // Radar scope with crosshair and two blips.
+        const int cx = width - 62, cy = height / 2;
+        for (int r : {18, 36, 54})
+            ring(body, cx, cy, r, t.accent, LV_OPA_30);
+        faint(body, cx - 54, cy, 108, 1, t.accent, LV_OPA_20);
+        faint(body, cx, cy - 54, 1, 108, t.accent, LV_OPA_20);
+        lv_obj_t *blip = faint(body, cx + 20, cy - 24, 5, 5, t.accent2, LV_OPA_50);
+        if (blip) lv_obj_set_style_radius(blip, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_t *echo = faint(body, cx - 30, cy + 16, 4, 4, t.accent, LV_OPA_50);
+        if (echo) lv_obj_set_style_radius(echo, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    }
 }
 
 std::string config_get_str(const char *key, std::string value)
@@ -139,7 +305,7 @@ Ground0Home::Ground0Home(lv_obj_t *parent, IconLookup lookup)
 {
     if (!parent_) return;
     load_settings();
-    root_ = box(parent_, 0, 0, kScreenW, kScreenH, ground0::theme().bg);
+    root_ = box(parent_, 0, 0, kScreenW, kScreenH, ground0::theme().desk);
     if (!root_) return;
     lv_obj_add_event_cb(root_, on_root_deleted, LV_EVENT_DELETE, this);
     status_timer_ = lv_timer_create(on_status_timer, 15000, this);
@@ -250,7 +416,7 @@ void Ground0Home::rebuild()
     rows_ = {};
     row_count_ = 0;
 
-    lv_obj_set_style_bg_color(root_, hex(ground0::theme().bg), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(root_, hex(ground0::theme().desk), LV_PART_MAIN);
     build_bar();
     build_strip();
     if (view_ == View::Grid)
@@ -265,80 +431,149 @@ void Ground0Home::rebuild()
 void Ground0Home::build_bar()
 {
     const ground0::Theme &t = ground0::theme();
-    lv_obj_t *bar = box(root_, 0, 0, kScreenW, kBarH, t.bar);
-    if (!bar) return;
-    box(bar, 0, kBarH - 1, kScreenW, 1, t.line);
-
     const lv_font_t *logo = logo_font();
-    lv_obj_t *word = text(bar, 6, 2, 0, logo, t.bar_text, "GROUND");
-    lv_obj_t *zero = text(bar, 6, 2, 0, logo, t.bar == t.accent ? t.bar_text : t.accent, "0");
-    if (word && zero) {
-        lv_obj_update_layout(word);
-        lv_obj_set_x(zero, 6 + lv_obj_get_width(word));
+    const int title_y = centred(kBarH, logo);
+
+    // Measure the wordmark first: a title tab is only as wide as its text.
+    lv_obj_t *word = text(root_, 0, title_y, 0, logo, t.bar_text, "GROUND");
+    lv_obj_t *zero = text(root_, 0, title_y, 0, logo, t.bar_text, "0");
+    if (!word || !zero) return;
+    lv_obj_update_layout(word);
+    lv_obj_update_layout(zero);
+    const int word_w = lv_obj_get_width(word);
+    const int title_w = word_w + lv_obj_get_width(zero);
+
+    const int bar_w = t.title_tab ? title_w + 20 : kScreenW;
+    // Taller than the bar by the corner radius, so only the top corners are
+    // rounded: the info strip covers the rounded bottom edge.
+    lv_obj_t *bar = box(root_, 0, 0, bar_w, kBarH + t.win_radius, t.bar);
+    if (!bar) return;
+    lv_obj_set_style_radius(bar, t.win_radius, LV_PART_MAIN);
+    gradient(bar, t.bar, t.bar_fill == ground0::Fill::Stripes ? t.bar : t.bar_b,
+             t.bar_fill == ground0::Fill::GradH);
+
+    const int title_x = t.title_center ? (bar_w - title_w) / 2 : (t.title_tab ? 10 : 6);
+    if (t.bar_fill == ground0::Fill::Stripes) {
+        for (int y = 4; y < kBarH - 4; y += 2)
+            box(root_, 4, y, bar_w - 8, 1, t.bar_b);
+        box(root_, title_x - 5, 1, title_w + 10, kBarH - 2, t.bar);        // clear behind the title
+        box(root_, kScreenW - 88, 1, 84, kBarH - 2, t.bar);                // and behind the status text
+    }
+    if (t.bevel) {
+        bevel_edge(root_, 0, 0, bar_w, kBarH, true);
+    } else if (t.bar_fill == ground0::Fill::Solid || t.title_tab) {
+        box(root_, 0, kBarH - 1, kScreenW, 1, t.line);
     }
 
-    const lv_font_t *small = bold_font(11);
-    clock_ = text(bar, kScreenW - 42, 4, 36, small, t.bar_text, "--:--", LV_TEXT_ALIGN_RIGHT);
-    battery_ = text(bar, kScreenW - 82, 4, 36, small, t.bar_text, "", LV_TEXT_ALIGN_RIGHT);
+    // The zero takes the accent colour where that reads against the bar.
+    const uint32_t under_zero = t.bar_fill == ground0::Fill::GradH ? t.bar : (t.bar_fill == ground0::Fill::GradV ? t.bar_b : t.bar);
+    uint32_t zero_color = t.bar_text;
+    if (reads_on(t.accent, under_zero))
+        zero_color = t.accent;
+    else if (reads_on(0xffe14a, under_zero))
+        zero_color = 0xffe14a;
+    lv_obj_set_style_text_color(zero, hex(zero_color), LV_PART_MAIN);
+    lv_obj_set_pos(word, title_x, title_y);
+    lv_obj_set_pos(zero, title_x + word_w, title_y);
+    lv_obj_move_foreground(word);
+    lv_obj_move_foreground(zero);
+
+    const lv_font_t *status = chip_font();
+    const uint32_t status_color = t.title_tab ? (is_dark(t.desk) ? 0xffffff : 0x000000) : t.bar_text;
+    const int status_y = centred(kBarH, status);
+    clock_ = text(root_, kScreenW - 44, status_y, 38, status, status_color, "--:--", LV_TEXT_ALIGN_RIGHT);
+    battery_ = text(root_, kScreenW - 84, status_y, 38, status, status_color, "", LV_TEXT_ALIGN_RIGHT);
 }
 
 void Ground0Home::build_strip()
 {
     const ground0::Theme &t = ground0::theme();
-    lv_obj_t *strip = box(root_, 0, kBarH, kScreenW, kStripH, t.face);
+    lv_obj_t *strip = box(root_, 0, kBarH, kScreenW, kStripH, t.strip);
     if (!strip) return;
-    box(strip, 0, kStripH - 1, kScreenW, 1, t.line);
-    const lv_font_t *small = text_font(10);
-    // Text on `face`: light skins use black-ish text, dark themes use `dim`.
-    strip_left_ = text(strip, 6, 2, 150, small, t.dim, "");
-    strip_right_ = text(strip, kScreenW - 156, 2, 150, small, t.dim, t.name, LV_TEXT_ALIGN_RIGHT);
+    gradient(strip, t.strip, t.strip_b, false);
+    if (t.bevel)
+        bevel_edge(strip, 0, 0, kScreenW, kStripH, true);
+    else
+        box(strip, 0, kStripH - 1, kScreenW, 1, t.line);
+    const lv_font_t *small = small_font();
+    const int y = centred(kStripH, small);
+    strip_left_ = text(strip, 6, y, 150, small, t.strip_text, "");
+    strip_right_ = text(strip, kScreenW - 156, y, 150, small, t.strip_text, t.name, LV_TEXT_ALIGN_RIGHT);
 }
 
 void Ground0Home::build_list()
 {
     const ground0::Theme &t = ground0::theme();
-    const lv_font_t *name_font = text_font(12);
+    const lv_font_t *name_font = text_font();
+    const bool outline = !t.bevel && !t.gloss;
+
+    lv_obj_t *body = box(root_, 0, kBodyY, kListW, kBodyH, t.bg);
+    if (body) draw_art(body, kListW, kBodyH);
+
     row_count_ = kListRows;
     for (int i = 0; i < kListRows; ++i) {
         Row &row = rows_[i];
-        row.box = box(root_, 0, kBodyY + i * kRowH, kListW, kRowH, t.sel);
+        row.box = box(root_, t.bevel ? 1 : 0, kBodyY + i * kRowH, kListW - (t.bevel ? 2 : 0), kRowH, t.sel);
         if (!row.box) continue;
+        selection_fill(row.box);
         lv_obj_set_style_radius(row.box, t.radius, LV_PART_MAIN);
         lv_obj_set_style_border_color(row.box, hex(t.accent), LV_PART_MAIN);
-        row.name = text(row.box, 6, 3, kListW - kRowIcon - 16, name_font, t.text, "");
+        lv_obj_set_style_border_width(row.box, outline ? 1 : 0, LV_PART_MAIN);
+        row.name = text(row.box, 6, centred(kRowH, name_font), kListW - kRowIcon - 18, name_font, t.text, "");
         row.icon = lv_image_create(row.box);
         if (row.icon) {
-            lv_obj_set_pos(row.icon, kListW - kRowIcon - 5, (kRowH - kRowIcon) / 2);
+            lv_obj_set_pos(row.icon, kListW - kRowIcon - 7, (kRowH - kRowIcon) / 2);
             lv_obj_set_size(row.icon, kRowIcon, kRowIcon);
             lv_image_set_inner_align(row.icon, LV_IMAGE_ALIGN_CENTER);
         }
     }
+    if (t.bevel) bevel_edge(root_, 0, kBodyY, kListW, kBodyH, false);   // sunken list field
 
     const int pane_x = kListW;
     const int pane_w = kScreenW - kListW;
     lv_obj_t *pane = box(root_, pane_x, kBodyY, pane_w, kBodyH, t.face);
     if (!pane) return;
-    box(pane, 0, 0, 1, kBodyH, t.line);
+    if (!t.bevel) box(pane, 0, 0, 1, kBodyH, t.line);
     detail_icon_ = lv_image_create(pane);
     if (detail_icon_) {
-        lv_obj_set_pos(detail_icon_, (pane_w - kDetailIcon) / 2, 8);
+        lv_obj_set_pos(detail_icon_, (pane_w - kDetailIcon) / 2, 6);
         lv_obj_set_size(detail_icon_, kDetailIcon, kDetailIcon);
         lv_image_set_inner_align(detail_icon_, LV_IMAGE_ALIGN_CENTER);
     }
-    detail_name_ = text(pane, 6, 70, pane_w - 12, bold_font(12), t.text, "", LV_TEXT_ALIGN_CENTER);
-    detail_sub_ = text(pane, 6, 87, pane_w - 12, text_font(10), t.dim, "", LV_TEXT_ALIGN_CENTER);
+    const lv_font_t *bold = bold_font();
+    const lv_font_t *small = small_font();
+    detail_name_ = text(pane, 6, 66, pane_w - 12, bold, t.text, "", LV_TEXT_ALIGN_CENTER);
+    detail_sub_ = text(pane, 6, 66 + static_cast<int>(lv_font_get_line_height(bold)) + 1, pane_w - 12,
+                       small, t.dim, "", LV_TEXT_ALIGN_CENTER);
 
-    lv_obj_t *chip = box(pane, (pane_w - 78) / 2, 102, 78, 15, t.accent);
-    if (chip) {
-        lv_obj_set_style_radius(chip, t.radius, LV_PART_MAIN);
-        text(chip, 0, 2, 78, bold_font(10), t.on_accent, "Enter open", LV_TEXT_ALIGN_CENTER);
+    const int chip_w = 82, chip_h = 16;
+    const int chip_x = (pane_w - chip_w) / 2, chip_y = kBodyH - chip_h - 3;
+    const lv_font_t *chip_text = chip_font();
+    if (t.bevel) {
+        lv_obj_t *chip = box(pane, chip_x, chip_y, chip_w, chip_h, t.face);
+        if (chip) {
+            bevel_edge(chip, 0, 0, chip_w, chip_h, true);
+            text(chip, 0, centred(chip_h, chip_text), chip_w, chip_text, t.text, "Enter open", LV_TEXT_ALIGN_CENTER);
+        }
+    } else {
+        lv_obj_t *chip = box(pane, chip_x, chip_y, chip_w, chip_h, t.accent);
+        if (chip) {
+            if (t.gloss) gradient(chip, lighten(t.accent, 35), t.accent, false);
+            lv_obj_set_style_radius(chip, t.radius, LV_PART_MAIN);
+            text(chip, 0, centred(chip_h, chip_text), chip_w, chip_text, t.on_accent, "Enter open", LV_TEXT_ALIGN_CENTER);
+        }
     }
 }
 
 void Ground0Home::build_grid()
 {
     const ground0::Theme &t = ground0::theme();
-    const lv_font_t *label_font = text_font(10);
+    const lv_font_t *label_font = small_font();
+    const bool outline = !t.bevel && !t.gloss;
+
+    lv_obj_t *body = box(root_, 0, kBodyY, kScreenW, kBodyH, t.bg);
+    if (body) draw_art(body, kScreenW, kBodyH);
+
     row_count_ = kGridCells;
     for (int i = 0; i < kGridCells; ++i) {
         Row &cell = rows_[i];
@@ -346,25 +581,32 @@ void Ground0Home::build_grid()
         const int y = kBodyY + (i / kGridCols) * kCellH;
         cell.box = box(root_, x + 1, y + 1, kCellW - 2, kCellH - 2, t.sel);
         if (!cell.box) continue;
+        selection_fill(cell.box);
         lv_obj_set_style_radius(cell.box, t.radius, LV_PART_MAIN);
         lv_obj_set_style_border_color(cell.box, hex(t.accent), LV_PART_MAIN);
+        lv_obj_set_style_border_width(cell.box, outline ? 1 : 0, LV_PART_MAIN);
         cell.icon = lv_image_create(cell.box);
         if (cell.icon) {
-            lv_obj_set_pos(cell.icon, (kCellW - 2 - kCellIcon) / 2, 4);
+            lv_obj_set_pos(cell.icon, (kCellW - 2 - kCellIcon) / 2, 3);
             lv_obj_set_size(cell.icon, kCellIcon, kCellIcon);
             lv_image_set_inner_align(cell.icon, LV_IMAGE_ALIGN_CENTER);
         }
-        cell.name = text(cell.box, 2, 43, kCellW - 6, label_font, t.text, "", LV_TEXT_ALIGN_CENTER);
+        const int label_h = static_cast<int>(lv_font_get_line_height(label_font));
+        cell.name = text(cell.box, 2, kCellH - 3 - label_h, kCellW - 6, label_font, t.text, "",
+                         LV_TEXT_ALIGN_CENTER);
     }
+    if (t.bevel) bevel_edge(root_, 0, kBodyY, kScreenW, kBodyH, false);
 }
 
 void Ground0Home::build_footer()
 {
     const ground0::Theme &t = ground0::theme();
-    lv_obj_t *foot = box(root_, 0, kScreenH - kFootH, kScreenW, kFootH, t.face);
+    lv_obj_t *foot = box(root_, 0, kScreenH - kFootH, kScreenW, kFootH, t.foot);
     if (!foot) return;
-    box(foot, 0, 0, kScreenW, 1, t.line);
-    foot_label_ = text(foot, 6, 2, kScreenW - 12, text_font(9), t.dim, "");
+    gradient(foot, t.foot, t.foot_b, false);
+    box(foot, 0, 0, kScreenW, 1, t.bevel ? t.hi : t.line);
+    const lv_font_t *hint = load_font(t.font_text, t.small_px >= 14 ? 12 : t.small_px - 1);
+    foot_label_ = text(foot, 6, centred(kFootH, hint) + 1, kScreenW - 12, hint, t.foot_text, "");
 }
 
 void Ground0Home::set_icon(lv_obj_t *image, const std::string &path, uint32_t size)
@@ -406,15 +648,19 @@ void Ground0Home::bind()
         else
             std::snprintf(buffer, sizeof(buffer), "All apps  %zu of %zu", selected_ + 1, count);
         lv_label_set_text(strip_left_, buffer);
-        lv_obj_set_style_text_color(strip_left_, hex(searching_ ? t.accent : t.dim), LV_PART_MAIN);
+        // Search text takes the accent colour where that reads against the strip.
+        const bool accent_reads = reads_on(t.accent, t.strip);
+        lv_obj_set_style_text_color(
+            strip_left_, hex(searching_ && accent_reads ? t.accent : t.strip_text), LV_PART_MAIN);
     }
     if (strip_right_) {
+        const ground0::Theme &t = ground0::theme();
         if (searching_) {
             char buffer[32];
             std::snprintf(buffer, sizeof(buffer), count == 1 ? "%zu match" : "%zu matches", count);
             lv_label_set_text(strip_right_, buffer);
         } else {
-            lv_label_set_text(strip_right_, ground0::theme().name);
+            lv_label_set_text(strip_right_, t.name);
         }
     }
     if (foot_label_) {
@@ -442,7 +688,7 @@ void Ground0Home::bind_list()
         const std::size_t index = visible_[position];
         const bool on = position == selected_;
         lv_obj_set_style_bg_opa(row.box, on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_width(row.box, on ? 1 : 0, LV_PART_MAIN);
+        lv_obj_set_style_border_opa(row.box, on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
         if (row.name) {
             lv_label_set_text(row.name, items_[index].name.c_str());
             lv_obj_set_style_text_color(row.name, hex(on ? t.sel_text : t.text), LV_PART_MAIN);
@@ -477,7 +723,7 @@ void Ground0Home::bind_grid()
         const std::size_t index = visible_[position];
         const bool on = position == selected_;
         lv_obj_set_style_bg_opa(cell.box, on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_width(cell.box, on ? 1 : 0, LV_PART_MAIN);
+        lv_obj_set_style_border_opa(cell.box, on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
         if (cell.name) {
             lv_label_set_text(cell.name, items_[index].name.c_str());
             lv_obj_set_style_text_color(cell.name, hex(on ? t.sel_text : t.text), LV_PART_MAIN);
