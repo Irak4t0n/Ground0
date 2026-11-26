@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+reload_users() {
+    for dir in /run/user/*; do
+        uid=${dir##*/}
+        [ "$uid" -ge 1000 ] 2>/dev/null || continue
+        name=$(id -nu "$uid" 2>/dev/null) || continue
+        systemctl --user --machine="$name@.host" daemon-reload 2>/dev/null || true
+    done
+}
+if [ "$1" = configure ]; then
+    reload_users
+    # The launcher is not restarted here: it may be the program running this install.
+    echo "Ground0 is installed. It takes over at the next boot, or now with: ground0 on"
+fi

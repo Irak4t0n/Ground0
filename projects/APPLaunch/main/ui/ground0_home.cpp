@@ -316,6 +316,11 @@ const char *const kCategoryOrder[] = {
     "Media", "Creative & Office", "Games", "Emulators", "Education", "Lifestyle", "Other",
 };
 
+enum Command {
+    kCmdQuick, kCmdRadio, kCmdDesktop, kCmdKeyboard, kCmdLean, kCmdWifi, kCmdView, kCmdUpdateAll,
+    kCmdTheme = 100,   // + theme index
+};
+
 std::string lower(const std::string &value)
 {
     std::string out = value;
@@ -426,7 +431,7 @@ void Ground0Home::save_settings()
 
 std::size_t Ground0Home::page_size() const
 {
-    return view_ == View::Grid ? kGridCells : kListRows;
+    return grid_now() ? kGridCells : kListRows;
 }
 
 void Ground0Home::release_icons()
@@ -439,7 +444,17 @@ void Ground0Home::release_icons()
 void Ground0Home::set_items(std::vector<Ground0Item> items, std::size_t selected)
 {
     items_ = std::move(items);
+    items_.erase(std::remove_if(items_.begin(), items_.end(), [](const Ground0Item &item) { return item.command >= 0; }),
+                 items_.end());
     load_index();
+    // Commands ride along after the apps; they only ever show up in search results.
+    auto add_command = [this](int id, std::string name, const char *kind = "Command") {
+        Ground0Item item;
+        item.name = std::move(name);
+        item.detail = kind;
+        item.command = id;
+        items_.push_back(std::move(item));
+    };
     for (Ground0Item &item : items_) {
         const auto found = index_.find(item.exec);
         if (found != index_.end()) {
@@ -451,6 +466,16 @@ void Ground0Home::set_items(std::vector<Ground0Item> items, std::size_t selected
             item.category = item.exec.empty() ? "System Tools" : "Other";
         }
     }
+    add_command(kCmdQuick, "Quick panel");
+    add_command(kCmdRadio, "Radio MESH/FREE");
+    add_command(kCmdDesktop, "HDMI desktop on/off");
+    add_command(kCmdKeyboard, "Keyboard to HDMI");
+    add_command(kCmdLean, "Lean boot on/off");
+    add_command(kCmdWifi, "Wi-Fi on/off");
+    add_command(kCmdView, "View list/grid");
+    add_command(kCmdUpdateAll, "Update all apps");
+    for (int i = 0; i < ground0::theme_count(); ++i)
+        add_command(kCmdTheme + i, ground0::theme_at(i).name, "Theme");
     rebuild_tabs(tabs_.empty() ? saved_tab_ : tab_label());
     refilter(selected);
 }
@@ -467,7 +492,13 @@ void Ground0Home::refilter(std::size_t keep_item)
     ranked.reserve(items_.size());
     for (std::size_t i = 0; i < items_.size(); ++i) {
         int rank = 0;
-        if (searching_) {
+        if (items_[i].command >= 0) {
+            // Commands answer a typed query only, and sort after the apps.
+            // Typing "theme" or "command" lists them all.
+            rank = searching_ && !query.empty() ? match_rank(lower(items_[i].name), query) : -1;
+            if (rank < 0 && searching_ && !query.empty() && match_rank(lower(items_[i].detail), query) >= 0) rank = 50;
+            if (rank >= 0) rank += 1000;
+        } else if (searching_) {
             rank = match_rank(lower(items_[i].name), query);   // search always covers every app
         } else if (tab_kind() == TabKind::Favs) {
             rank = is_favorite(items_[i].name) ? 0 : -1;
@@ -514,7 +545,7 @@ void Ground0Home::rebuild()
     lv_obj_set_style_bg_color(root_, hex(ground0::theme().desk), LV_PART_MAIN);
     build_bar();
     build_strip();
-    if (view_ == View::Grid)
+    if (grid_now())
         build_grid();
     else
         build_list();
@@ -799,7 +830,7 @@ void Ground0Home::bind()
     if (count == 0) {
         first_ = 0;
         selected_ = 0;
-    } else if (view_ == View::Grid) {
+    } else if (grid_now()) {
         first_ = (selected_ / page) * page;
     } else {
         if (selected_ < first_) first_ = selected_;
@@ -808,7 +839,7 @@ void Ground0Home::bind()
             first_ = count > page ? count - page : 0;
     }
 
-    if (view_ == View::Grid)
+    if (grid_now())
         bind_grid();
     else
         bind_list();
@@ -855,7 +886,7 @@ void Ground0Home::bind()
     if (foot_label_) {
         const char *hint = searching_
             ? "type to filter  Tab next  Enter open  Esc close"
-            : view_ == View::Grid
+            : grid_now()
                 ? "Tab lists  V fav  Space find  G list  T theme  Q quick"
                 : "Tab lists  V fav  Space find  G grid  T theme  Q quick";
         lv_label_set_text(foot_label_, hint);
@@ -902,7 +933,7 @@ void Ground0Home::bind_list()
         set_icon(detail_icon_, item.icon, kDetailIcon);
         if (detail_name_) lv_label_set_text(detail_name_, item.name.c_str());
         if (detail_sub_) {
-            const std::string sub = !item.next.empty() ? item.have + " > " + item.next + "  U updates"
+            const std::string sub = !item.next.empty() ? "U: " + item.have + " > " + item.next
                                     : !item.category.empty() ? item.category : item.detail;
             lv_label_set_text(detail_sub_, sub.c_str());
             lv_obj_set_style_text_color(
@@ -1020,7 +1051,7 @@ Ground0Home::Action Ground0Home::handle_key(const struct key_item &item)
     if (item.key_state != KBD_KEY_PRESSED) return Action::None;
     if (code == KEY_SPACE) {
         const std::size_t keep = selected();
-        searching_ = true;
+        set_searching(true);
         query_.clear();
         refilter(keep);
         return Action::Handled;
@@ -1083,16 +1114,19 @@ Ground0Home::Action Ground0Home::handle_search_key(const struct key_item &item)
         if (code != KEY_ENTER || visible_.empty()) return Action::None;
         // Leave search with the chosen app selected, then let the owner launch it.
         const std::size_t chosen = selected();
-        note_launch();
-        searching_ = false;
+        const int command = items_[chosen].command;
+        if (command < 0) note_launch();
+        set_searching(false);
         query_.clear();
-        refilter(chosen);
-        return Action::Launch;
+        refilter(command < 0 ? chosen : 0);
+        if (command < 0) return Action::Launch;
+        run_command(command);
+        return Action::Handled;
     }
 
     if (code == KEY_ESC && item.key_state == KBD_KEY_PRESSED) {
         const std::size_t keep = selected();
-        searching_ = false;
+        set_searching(false);
         query_.clear();
         refilter(keep);
         return Action::Handled;
@@ -1104,7 +1138,7 @@ Ground0Home::Action Ground0Home::handle_search_key(const struct key_item &item)
     if (code == KEY_BACKSPACE) {
         if (query_.empty()) {
             const std::size_t keep = selected();
-            searching_ = false;
+            set_searching(false);
             refilter(keep);
             return Action::Handled;
         }
@@ -1398,7 +1432,7 @@ void Ground0Home::paint_quick()
     value[kQuickAutostart] = !desk_.installed ? "-" : desk_.autostart ? "On" : "Off";
     live[kQuickAutostart] = desk_.installed && desk_.autostart;
 
-    value[kQuickLean] = lean_ == ground0::Switch::On ? "On, no desktop at boot"
+    value[kQuickLean] = lean_ == ground0::Switch::On ? "On"
                         : lean_ == ground0::Switch::Off ? "Off" : "-";
     live[kQuickLean] = lean_ == ground0::Switch::On;
     value[kQuickWifi] = wifi_.radio == ground0::Switch::Off ? "Off"
@@ -1517,5 +1551,65 @@ void Ground0Home::on_quick_timer(lv_timer_t *timer) noexcept
         self->read_quick(slow);
         self->paint_quick();
     } catch (...) {
+    }
+}
+
+void Ground0Home::run_command(int command)
+{
+    auto quick_row = [this](int row) {
+        read_quick(true);
+        quick_selected_ = row;
+        act_quick();
+    };
+    if (command >= kCmdTheme) {
+        ground0::set_theme(command - kCmdTheme);
+        release_icons();
+        save_settings();
+        rebuild();
+        return;
+    }
+    switch (command) {
+    case kCmdQuick: open_quick(); break;
+    case kCmdRadio: toggle_radio(); break;
+    case kCmdDesktop: quick_row(kQuickDesktop); break;
+    case kCmdKeyboard: quick_row(kQuickKeyboard); break;
+    case kCmdLean: quick_row(kQuickLean); break;
+    case kCmdWifi: quick_row(kQuickWifi); break;
+    case kCmdView:
+        release_icons();
+        view_ = view_ == View::Grid ? View::List : View::Grid;
+        first_ = 0;
+        save_settings();
+        rebuild();
+        break;
+    case kCmdUpdateAll: {
+        std::vector<std::string> all;
+        for (const Ground0Item &item : items_)
+            if (!item.next.empty()) all.push_back(item.uuid);
+        if (all.empty())
+            launcher_toast().show("Everything is up to date");
+        else
+            start_update(all);
+        break;
+    }
+    default: break;
+    }
+}
+
+// Search always uses the list layout: results include commands, whose names
+// do not fit under a grid icon.
+bool Ground0Home::grid_now() const
+{
+    return view_ == View::Grid && !searching_;
+}
+
+void Ground0Home::set_searching(bool on)
+{
+    if (searching_ == on) return;
+    searching_ = on;
+    if (view_ == View::Grid) {
+        release_icons();
+        first_ = 0;
+        rebuild();
     }
 }

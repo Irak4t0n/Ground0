@@ -33,6 +33,7 @@ struct Ground0Item
     std::string uuid;
     std::string have;     // installed version
     std::string next;     // newer version available, or empty
+    int command = -1;     // >= 0: a Ground0 command shown in search, not an app
 };
 
 class Ground0Home
@@ -118,6 +119,9 @@ private:
     static void on_quick_timer(lv_timer_t *timer) noexcept;
 
     // Quick panel: radio, HDMI desk, lean boot, Wi-Fi.
+    void run_command(int command);
+    bool grid_now() const;
+    void set_searching(bool on);
     void open_quick();
     void close_quick();
     void build_quick();

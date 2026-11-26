@@ -1,0 +1,18 @@
+Package: ground0
+Version: @VERSION@
+Architecture: arm64
+Maintainer: Irak4t0n <Irak4t0n@users.noreply.github.com>
+Section: misc
+Priority: optional
+Pre-Depends: dpkg (>= 1.19)
+Depends: applaunch, python3, curl, sudo, systemd
+Recommends: cz-desk-mode, network-manager
+Homepage: https://github.com/Irak4t0n/Ground0
+Description: Ground0 home screen for the M5Stack Cardputer Zero
+ A replacement home screen for the Cardputer Zero launcher: app list and icon
+ grid, type-to-search with commands, favourites, recents and store categories,
+ per-app updates through 0Hero, 24 themes, a LoRa radio switch for MeshZero,
+ and a quick panel for the HDMI desktop, lean boot and Wi-Fi.
+ .
+ The stock launcher is kept beside it. "ground0 off" switches back, and
+ removing this package restores the stock launcher.

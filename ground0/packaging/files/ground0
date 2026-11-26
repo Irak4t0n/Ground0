@@ -1,0 +1,30 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Ground0 control: switch between Ground0 and the stock launcher.
+RUN="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR="$RUN"
+OFF="$HOME/.config/ground0/disabled"
+
+restart() { systemctl --user daemon-reload; systemctl --user restart APPLaunch.service; }
+
+case "$1" in
+on)
+    rm -f "$OFF" "$RUN/ground0-fallback" "$RUN/ground0-starts"
+    if [ -e /etc/ground0/disabled ]; then
+        echo "Ground0 is switched off for every user: remove /etc/ground0/disabled"; exit 1
+    fi
+    restart; echo "Ground0 is on." ;;
+off)
+    mkdir -p "$(dirname "$OFF")" && : > "$OFF"
+    restart; echo "Stock launcher is on. 'ground0 on' brings Ground0 back." ;;
+status)
+    version=$(dpkg-query -W -f '${Version}' ground0 2>/dev/null)
+    echo "Ground0 ${version:-not installed as a package}"
+    if [ -e "$OFF" ] || [ -e /etc/ground0/disabled ]; then echo "switched off: the stock launcher runs"
+    elif [ -e "$RUN/ground0-fallback" ]; then echo "fell back to the stock launcher after a crash loop ('ground0 on' retries)"
+    else echo "switched on"; fi
+    echo "launcher service: $(systemctl --user is-active APPLaunch.service)" ;;
+*)
+    echo "usage: ground0 on | off | status"
+    echo "Remove Ground0 completely with: sudo apt remove ground0"; exit 2 ;;
+esac

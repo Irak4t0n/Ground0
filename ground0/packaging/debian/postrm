@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+if [ "$1" = remove ] || [ "$1" = purge ] || [ "$1" = abort-install ]; then
+    dpkg-divert --package ground0 --remove --rename \
+        --divert /usr/share/APPLaunch/bin/M5CardputerZero-APPLaunch.stock \
+        /usr/share/APPLaunch/bin/M5CardputerZero-APPLaunch
+    for dir in /run/user/*; do
+        uid=${dir##*/}
+        [ "$uid" -ge 1000 ] 2>/dev/null || continue
+        name=$(id -nu "$uid" 2>/dev/null) || continue
+        systemctl --user --machine="$name@.host" daemon-reload 2>/dev/null || true
+    done
+    echo "Ground0 removed. The stock launcher returns at the next boot, or now with: systemctl --user restart APPLaunch.service"
+fi

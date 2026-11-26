@@ -1,0 +1,26 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Starts Ground0, or the stock launcher when Ground0 is switched off or keeps
+# crashing. Run by APPLaunch.service through the ground0 drop-in.
+G0=/usr/share/APPLaunch/bin/M5CardputerZero-APPLaunch
+STOCK=/usr/share/APPLaunch/bin/M5CardputerZero-APPLaunch.stock
+RUN="${XDG_RUNTIME_DIR:-/tmp}"
+
+# Without a stock launcher there is nothing to fall back to.
+[ -x "$STOCK" ] || exec "$G0"
+
+if [ -e /etc/ground0/disabled ] || [ -e "$HOME/.config/ground0/disabled" ] || [ -e "$RUN/ground0-fallback" ]; then
+    exec "$STOCK"
+fi
+
+# Five starts inside a minute is a crash loop: use the stock launcher until the
+# next boot, or until "ground0 on".
+now=$(date +%s)
+recent=$( { cat "$RUN/ground0-starts" 2>/dev/null; echo "$now"; } | awk -v now="$now" 'now - $1 < 60' )
+printf '%s\n' "$recent" > "$RUN/ground0-starts"
+if [ "$(printf '%s\n' "$recent" | wc -l)" -ge 5 ]; then
+    echo "ground0: crash loop, falling back to the stock launcher" >&2
+    : > "$RUN/ground0-fallback"
+    exec "$STOCK"
+fi
+exec "$G0"

@@ -1,0 +1,3 @@
+# Ground0: the radio switch and lean boot change system services. Let members
+# of the sudo group run exactly these commands without a password.
+%sudo ALL=(root) NOPASSWD: /usr/bin/systemctl start meshzero.service, /usr/bin/systemctl stop meshzero.service, /usr/bin/systemctl enable lightdm.service, /usr/bin/systemctl disable lightdm.service
