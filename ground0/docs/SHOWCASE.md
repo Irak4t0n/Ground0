@@ -40,11 +40,16 @@ Apps with a newer store version carry a dot. In the Updates list `Enter` updates
 ![Radio](clips/06-radio.gif)
 
 ## 7. Quick panel
-`Q` opens the switches for the radio, the HDMI desktop, the keyboard handover, lean boot and Wi-Fi.
+`Q` opens the switches for the radio, the HDMI desktop, the keyboard handover, lean boot, Wi-Fi and the Wi-Fi dongle.
 
 ![Quick panel](clips/07-quick.gif)
 
-## 8. Themes
+## 8. Wi-Fi on a USB dongle
+Plug a USB Wi-Fi adapter in and the quick panel's last row shows it being tested for 30 seconds, then carrying the connection. While an app has the adapter (monitor mode) the built-in radio takes over and the row reads busy; an adapter that drops out is marked unstable, and `Enter` on the row tests it again.
+
+![Wi-Fi dongle](clips/10-dongle.gif)
+
+## 9. Themes
 `T` steps through all 24. Each theme sets its own chrome, fonts and corner style.
 
 ![Themes, list view](clips/08-themes.gif)

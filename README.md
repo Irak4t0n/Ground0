@@ -15,8 +15,8 @@ On the device ([video](ground0/docs/demo-device.mp4)):
 - **Lists.** Favourites, all apps, recents, updates, and one list per store category (Security, Radio & Comms, Hardware & IoT ...). `Tab` cycles.
 - **Updates built in.** Apps with a newer store version get a dot. Update one app, or all of them, without leaving the home screen. Uses the 0Hero update engine when it is installed.
 - **Radio switch.** One LoRa cap, several programs that want it. A status-bar chip shows whether MeshZero holds the radio (`MESH`) or it is free for apps (`FREE`). Apps that drive the radio themselves stop MeshZero when they open and hand it back when they close.
-- **Quick panel.** `Q` opens switches for the radio, the HDMI desktop, the keyboard handover to that desktop, lean boot and Wi-Fi.
-- **Wi-Fi follows a USB dongle.** Plug a USB Wi-Fi adapter in (USB switch on Host). Ground0 tests it for 30 seconds beside the built-in radio, then moves the network you are on over to it, with the same settings and address, and disconnects the built-in radio. Unplug it, or let an app take it into monitor mode, and the built-in radio reconnects by itself.
+- **Quick panel.** `Q` opens switches for the radio, the HDMI desktop, the keyboard handover to that desktop, lean boot, Wi-Fi and the Wi-Fi dongle.
+- **Wi-Fi follows a USB dongle.** Plug a USB Wi-Fi adapter in (USB switch on Host). Ground0 tests it for 30 seconds beside the built-in radio, then moves the network you are on over to it, with the same settings and address, and disconnects the built-in radio. Unplug it, or let an app take it over (monitor mode, an access point), and the built-in radio reconnects by itself; when the app gives it back, the adapter is tested and used again.
 - **24 themes.** Ten originals and fourteen classic desktop skins from [1999 Online](https://github.com/GoatsAndMonkeys/1999-online). Themes change chrome, fonts and layout details, not only colours.
 
 | Icon grid | Search |
@@ -114,7 +114,7 @@ scons -j8
 export CardputerZero=y CONFIG_REPO_AUTOMATION=y
 scons -j8
 # package
-../../ground0/packaging/build-deb.sh dist/M5CardputerZero-APPLaunch 0.2.2
+../../ground0/packaging/build-deb.sh dist/M5CardputerZero-APPLaunch 0.2.4
 ```
 
 Simulator switches for testing without the hardware: `GROUND0_RADIO_SIM=mesh|free`, `GROUND0_DESK_DIR=<folder>`, `GROUND0_HDMI_SIM=1`, `GROUND0_LEAN_SIM=0|1`, `GROUND0_APPS_DIR=<folder>`.

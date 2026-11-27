@@ -18,8 +18,8 @@
 #  3. If the adapter fails the trial, or drops out later, the built-in radio
 #     takes over again and the adapter is left alone until "on" is asked for
 #     again (or the next boot). A dropping adapter is not retried in a loop.
-# An app putting the adapter into monitor mode, or unplugging it, is not a
-# failure: the built-in radio reconnects and the adapter is used again later.
+# An app taking the adapter (monitor mode, or away from NetworkManager), or
+# unplugging it, is not a failure: the built-in radio reconnects and the adapter is used again later.
 FLAG=/etc/ground0/wifi-follow
 STATE=/run/ground0-wifi            # "<profile uuid> <adapter ifindex>" while moved
 TRYING=/run/ground0-wifi-trial     # exists during the trial
@@ -47,6 +47,12 @@ connected() { nmcli -g GENERAL.STATE device show "$1" 2>/dev/null | grep -q '^10
 active_uuid() { nmcli -g GENERAL.CON-UUID device show "$1" 2>/dev/null | head -n 1; }
 active_name() { nmcli -g GENERAL.CONNECTION device show "$1" 2>/dev/null | head -n 1; }
 ifindex() { cat "/sys/class/net/$1/ifindex" 2>/dev/null; }
+# Something else has the adapter: monitor mode, or an app took it away from
+# NetworkManager (an access point, a capture tool). Not a failure.
+busy() {
+    [ "$(cat "/sys/class/net/$1/type" 2>/dev/null)" = 1 ] || return 0
+    nmcli -g GENERAL.STATE device show "$1" 2>/dev/null | grep -q '^10 '
+}
 
 # Bring the built-in radio back, and do not return until it is, or every way failed.
 restore() {
@@ -84,15 +90,23 @@ trial() {
         ipv6.method disabled >/dev/null 2>&1
     ok=1
     nmcli --wait 30 connection up id "$CLONE" ifname "$usb" >/dev/null 2>&1 || ok=0
-    waited=0
+    # The adapter resetting itself (its interface number changes) fails the trial
+    # at once. A missed ping or a moment of reconnecting does not: only three
+    # bad samples in a row do, so a busy device or a roam between access points
+    # is not mistaken for a bad adapter.
+    waited=0; bad=0
     while [ "$ok" = 1 ] && [ "$waited" -lt "$TRIAL" ]; do
         sleep 3; waited=$((waited + 3))
-        [ "$(ifindex "$usb")" = "$index" ] || ok=0          # the adapter reset itself
-        connected "$usb" || ok=0
-        if [ "$ok" = 1 ] && [ -n "$gateway" ]; then
-            ping -I "$usb" -c 1 -W 2 "$gateway" >/dev/null 2>&1 || ping -I "$usb" -c 1 -W 2 "$gateway" >/dev/null 2>&1 || ok=0
+        [ "$(ifindex "$usb")" = "$index" ] || { ok=0; break; }
+        good=1
+        connected "$usb" || good=0
+        if [ "$good" = 1 ] && [ -n "$gateway" ]; then
+            ping -I "$usb" -c 2 -W 2 "$gateway" >/dev/null 2>&1 || good=0
         fi
+        if [ "$good" = 1 ]; then bad=0; else bad=$((bad + 1)); fi
+        [ "$bad" -lt 3 ] || ok=0
     done
+    [ "$bad" = 0 ] || ok=0          # it has to be working when the trial ends
     nmcli connection delete id "$CLONE" >/dev/null 2>&1
     rm -f "$TRYING"
     [ "$ok" = 1 ]
@@ -124,8 +138,8 @@ sync_once() {
             date +%s > "$LOST"
             restore; return 0
         fi
-        if [ ! -e "$FLAG" ] || [ "$(cat "/sys/class/net/$usb/type" 2>/dev/null)" != 1 ]; then
-            restore; return 0                      # switched off, or an app took monitor mode
+        if [ ! -e "$FLAG" ] || busy "$usb"; then
+            restore; return 0                      # switched off, or an app took the adapter
         fi
         if connected "$usb" && [ "$(active_name "$usb")" = "$CLONE" ]; then
             connected "$onboard" && nmcli device disconnect "$onboard" >/dev/null 2>&1
@@ -140,12 +154,13 @@ sync_once() {
     [ -e "$FLAG" ] || return 0
     [ -e "$FAILED" ] && return 0
     [ -n "$usb" ] || return 0
-    [ "$(cat "/sys/class/net/$usb/type" 2>/dev/null)" = 1 ] || return 0
-    # An adapter that reappears within a minute of vanishing reset itself; it was not replugged.
+    busy "$usb" && return 0
+    # An adapter that is back within ten seconds of vanishing reset itself (that
+    # takes about a second); nobody replugs one that fast.
     if [ -e "$LOST" ]; then
         gone=$(( $(date +%s) - $(cat "$LOST") ))
         rm -f "$LOST"
-        if [ "$gone" -lt 60 ]; then give_up "it dropped off the USB port and came back"; return 0; fi
+        if [ "$gone" -lt 10 ]; then give_up "it dropped off the USB port and came back"; return 0; fi
     fi
     src=$(active_uuid "$onboard")
     [ -n "$src" ] || return 0          # the built-in radio is on no network: nothing to move

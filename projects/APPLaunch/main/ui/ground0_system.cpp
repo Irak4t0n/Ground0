@@ -183,7 +183,8 @@ DongleState dongle_state()
 {
     DongleState state;
     if (const char *sim = std::getenv("GROUND0_DONGLE_SIM")) {   // "off", "none", "moved", "monitor", "testing", "failed"
-        const std::string mode = sim;
+        // A path instead of a word: the word is read from that file, so a test can change it live.
+        const std::string mode = sim[0] == '/' ? trimmed(slurp(sim)) : std::string(sim);
         state.available = true;
         state.enabled = mode != "off";
         if (mode != "off" && mode != "none") state.adapter = "wlan1";
