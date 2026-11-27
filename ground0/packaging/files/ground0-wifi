@@ -1,0 +1,183 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Ground0 Wi-Fi helper (runs as root; takes fixed words only, no other input).
+#
+#   sync       make Wi-Fi follow a plugged-in USB adapter, or give it back
+#   on | off   switch that behaviour on (also: try the adapter again) or off
+#   radio-on | radio-off   switch Wi-Fi itself
+#
+# "Follow" means: while a USB Wi-Fi adapter is plugged in and in normal
+# (managed) mode, the network the built-in radio is on moves to the adapter,
+# with the same settings and address, and the built-in radio disconnects.
+#
+# The built-in radio is never given up on trust:
+#  1. The adapter first joins the network beside the built-in radio (its own
+#     DHCP address, not the default route) and has to stay up and reach the
+#     gateway for TRIAL seconds.
+#  2. Only then does the network move over.
+#  3. If the adapter fails the trial, or drops out later, the built-in radio
+#     takes over again and the adapter is left alone until "on" is asked for
+#     again (or the next boot). A dropping adapter is not retried in a loop.
+# An app putting the adapter into monitor mode, or unplugging it, is not a
+# failure: the built-in radio reconnects and the adapter is used again later.
+FLAG=/etc/ground0/wifi-follow
+STATE=/run/ground0-wifi            # "<profile uuid> <adapter ifindex>" while moved
+TRYING=/run/ground0-wifi-trial     # exists during the trial
+FAILED=/run/ground0-wifi-failed    # why the adapter is being left alone
+LOST=/run/ground0-wifi-lost        # when the adapter vanished while it had the network
+CLONE=ground0-dongle
+TRIAL=30
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+log() { logger -t ground0-wifi "$*" 2>/dev/null; echo "$*"; }
+
+adapters() {
+    usb=""; onboard=""
+    for dir in /sys/class/net/*; do
+        [ -d "$dir/wireless" ] || [ -d "$dir/phy80211" ] || continue
+        name=${dir##*/}
+        case "$(readlink -f "$dir/device/subsystem" 2>/dev/null)" in
+            */usb) [ -n "$usb" ] || usb=$name ;;
+            *) [ -n "$onboard" ] || onboard=$name ;;
+        esac
+    done
+}
+
+connected() { nmcli -g GENERAL.STATE device show "$1" 2>/dev/null | grep -q '^100'; }
+active_uuid() { nmcli -g GENERAL.CON-UUID device show "$1" 2>/dev/null | head -n 1; }
+active_name() { nmcli -g GENERAL.CONNECTION device show "$1" 2>/dev/null | head -n 1; }
+ifindex() { cat "/sys/class/net/$1/ifindex" 2>/dev/null; }
+
+# Bring the built-in radio back, and do not return until it is, or every way failed.
+restore() {
+    src=$(cut -d' ' -f1 "$STATE" 2>/dev/null)
+    rm -f "$STATE" "$TRYING"
+    nmcli connection delete id "$CLONE" >/dev/null 2>&1
+    [ -n "$onboard" ] || return 0
+    nmcli device set "$onboard" autoconnect yes >/dev/null 2>&1
+    for try in 1 2 3; do
+        connected "$onboard" && { log "built-in Wi-Fi ($onboard) is connected"; return 0; }
+        [ -n "$src" ] && nmcli --wait 25 connection up uuid "$src" ifname "$onboard" >/dev/null 2>&1 && continue
+        nmcli --wait 25 device connect "$onboard" >/dev/null 2>&1
+    done
+    connected "$onboard" && { log "built-in Wi-Fi ($onboard) is connected"; return 0; }
+    log "built-in Wi-Fi ($onboard) did NOT reconnect"
+    return 1
+}
+
+give_up() {   # $1 = reason
+    echo "$1" > "$FAILED"
+    log "USB adapter ($usb): $1. Staying on built-in Wi-Fi until asked to try again"
+}
+
+# The adapter joins beside the built-in radio and must hold for TRIAL seconds.
+trial() {
+    src=$1
+    index=$(ifindex "$usb")
+    gateway=$(nmcli -g IP4.GATEWAY device show "$onboard" 2>/dev/null | head -n 1)
+    : > "$TRYING"
+    nmcli connection delete id "$CLONE" >/dev/null 2>&1
+    nmcli connection clone --temporary uuid "$src" "$CLONE" >/dev/null 2>&1 || { rm -f "$TRYING"; return 1; }
+    nmcli connection modify --temporary id "$CLONE" connection.interface-name "$usb" \
+        connection.autoconnect no 802-11-wireless.mac-address "" \
+        ipv4.method auto ipv4.addresses "" ipv4.gateway "" ipv4.dns "" ipv4.never-default yes \
+        ipv6.method disabled >/dev/null 2>&1
+    ok=1
+    nmcli --wait 30 connection up id "$CLONE" ifname "$usb" >/dev/null 2>&1 || ok=0
+    waited=0
+    while [ "$ok" = 1 ] && [ "$waited" -lt "$TRIAL" ]; do
+        sleep 3; waited=$((waited + 3))
+        [ "$(ifindex "$usb")" = "$index" ] || ok=0          # the adapter reset itself
+        connected "$usb" || ok=0
+        if [ "$ok" = 1 ] && [ -n "$gateway" ]; then
+            ping -I "$usb" -c 1 -W 2 "$gateway" >/dev/null 2>&1 || ping -I "$usb" -c 1 -W 2 "$gateway" >/dev/null 2>&1 || ok=0
+        fi
+    done
+    nmcli connection delete id "$CLONE" >/dev/null 2>&1
+    rm -f "$TRYING"
+    [ "$ok" = 1 ]
+}
+
+move() {
+    src=$1
+    nmcli connection clone --temporary uuid "$src" "$CLONE" >/dev/null 2>&1 || return 1
+    nmcli connection modify --temporary id "$CLONE" connection.interface-name "$usb" \
+        connection.autoconnect yes connection.autoconnect-priority 100 802-11-wireless.mac-address "" >/dev/null 2>&1
+    echo "$src $(ifindex "$usb")" > "$STATE"
+    nmcli device disconnect "$onboard" >/dev/null 2>&1
+    nmcli --wait 30 connection up id "$CLONE" ifname "$usb" >/dev/null 2>&1
+}
+
+sync_once() {
+    # With Wi-Fi switched off nothing can connect: leave everything as it is.
+    [ "$(nmcli radio wifi 2>/dev/null)" = enabled ] || return 0
+    adapters
+    [ -n "$onboard" ] || return 0
+
+    if [ -e "$STATE" ]; then
+        # Moved earlier. Is the adapter still the same one, and still ours?
+        index=$(cut -d' ' -f2 "$STATE")
+        if [ -z "$usb" ] || [ "$(ifindex "$usb")" != "$index" ]; then
+            # Gone. Pulled out on purpose, or reset itself: either way give Wi-Fi back.
+            # If it is already back under a new number it reset itself: do not chase it.
+            [ -n "$usb" ] && give_up "it dropped off the USB port and came back"
+            date +%s > "$LOST"
+            restore; return 0
+        fi
+        if [ ! -e "$FLAG" ] || [ "$(cat "/sys/class/net/$usb/type" 2>/dev/null)" != 1 ]; then
+            restore; return 0                      # switched off, or an app took monitor mode
+        fi
+        if connected "$usb" && [ "$(active_name "$usb")" = "$CLONE" ]; then
+            connected "$onboard" && nmcli device disconnect "$onboard" >/dev/null 2>&1
+            return 0                               # all as it should be
+        fi
+        # Not connected right now: allow a short reconnect (roaming) before giving up.
+        for wait in 1 2 3 4 5; do sleep 3; connected "$usb" && return 0; done
+        give_up "it lost the network"
+        restore; return 0
+    fi
+
+    [ -e "$FLAG" ] || return 0
+    [ -e "$FAILED" ] && return 0
+    [ -n "$usb" ] || return 0
+    [ "$(cat "/sys/class/net/$usb/type" 2>/dev/null)" = 1 ] || return 0
+    # An adapter that reappears within a minute of vanishing reset itself; it was not replugged.
+    if [ -e "$LOST" ]; then
+        gone=$(( $(date +%s) - $(cat "$LOST") ))
+        rm -f "$LOST"
+        if [ "$gone" -lt 60 ]; then give_up "it dropped off the USB port and came back"; return 0; fi
+    fi
+    src=$(active_uuid "$onboard")
+    [ -n "$src" ] || return 0          # the built-in radio is on no network: nothing to move
+
+    log "USB adapter ($usb) found: testing it for ${TRIAL}s beside the built-in Wi-Fi"
+    if ! trial "$src"; then
+        give_up "it did not hold a connection for ${TRIAL}s"
+        connected "$onboard" || restore
+        return 0
+    fi
+    if move "$src"; then
+        log "Wi-Fi moved to the USB adapter ($usb)"
+    else
+        give_up "it could not take over the connection"
+        restore
+    fi
+}
+
+case "$1" in
+sync)
+    exec 9>/run/ground0-wifi.lock
+    flock -n 9 || exit 0
+    # Twice: an event that arrives while the first pass runs is not lost.
+    sync_once; sleep 2; sync_once ;;
+on)
+    mkdir -p /etc/ground0 && : > "$FLAG"
+    rm -f "$FAILED" "$LOST"
+    systemctl --no-block start ground0-wifi.service 2>/dev/null || "$0" sync ;;
+off)
+    rm -f "$FLAG" "$FAILED"
+    systemctl --no-block start ground0-wifi.service 2>/dev/null || "$0" sync ;;
+radio-on) nmcli radio wifi on ;;
+radio-off) nmcli radio wifi off ;;
+*) echo "usage: ground0-wifi sync | on | off | radio-on | radio-off"; exit 2 ;;
+esac

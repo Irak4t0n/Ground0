@@ -317,7 +317,7 @@ const char *const kCategoryOrder[] = {
 };
 
 enum Command {
-    kCmdQuick, kCmdRadio, kCmdDesktop, kCmdKeyboard, kCmdLean, kCmdWifi, kCmdView, kCmdUpdateAll,
+    kCmdQuick, kCmdRadio, kCmdDesktop, kCmdKeyboard, kCmdLean, kCmdWifi, kCmdView, kCmdUpdateAll, kCmdDongle,
     kCmdTheme = 100,   // + theme index
 };
 
@@ -472,6 +472,7 @@ void Ground0Home::set_items(std::vector<Ground0Item> items, std::size_t selected
     add_command(kCmdKeyboard, "Keyboard to HDMI");
     add_command(kCmdLean, "Lean boot on/off");
     add_command(kCmdWifi, "Wi-Fi on/off");
+    add_command(kCmdDongle, "Wi-Fi dongle on/off");
     add_command(kCmdView, "View list/grid");
     add_command(kCmdUpdateAll, "Update all apps");
     for (int i = 0; i < ground0::theme_count(); ++i)
@@ -980,6 +981,16 @@ void Ground0Home::update_status()
         if (!away && root_) lv_obj_invalidate(root_);
     }
     if (keyboard_away_) return;
+    // The system hooks normally move Wi-Fi by themselves. If the state still
+    // disagrees with what is plugged in (an app left monitor mode without any
+    // network event), ask the helper to look again, a few times at most.
+    const ground0::DongleState dongle = ground0::dongle_state();
+    if (dongle.settled()) {
+        dongle_nudges_ = 0;
+    } else if (dongle_nudges_ < 4) {
+        ++dongle_nudges_;
+        ground0::dongle_sync();
+    }
     if (!radio_pending_) refresh_radio();
     if (!updating_ && file_stamp(cache_path("index.tsv")) != index_stamp_) apply_index();
     if (clock_) {
@@ -1343,8 +1354,8 @@ namespace {
 constexpr int kQuickW = 264;
 constexpr int kQuickRowH = 19;
 constexpr int kQuickHead = 19;
-const char *const kQuickNames[] = {"Radio", "HDMI desktop", "Keyboard", "HDMI on plug-in", "Lean boot", "Wi-Fi"};
-enum QuickRow { kQuickRadio, kQuickDesktop, kQuickKeyboard, kQuickAutostart, kQuickLean, kQuickWifi };
+const char *const kQuickNames[] = {"Radio", "HDMI desktop", "Keyboard", "HDMI on plug-in", "Lean boot", "Wi-Fi", "Wi-Fi dongle"};
+enum QuickRow { kQuickRadio, kQuickDesktop, kQuickKeyboard, kQuickAutostart, kQuickLean, kQuickWifi, kQuickDongle };
 }
 
 void Ground0Home::open_quick()
@@ -1370,6 +1381,7 @@ void Ground0Home::close_quick()
 void Ground0Home::read_quick(bool slow)
 {
     desk_ = ground0::desk_state();
+    dongle_ = ground0::dongle_state();
     if (slow) {
         lean_ = ground0::lean_boot();
         wifi_ = ground0::wifi_state();
@@ -1439,6 +1451,14 @@ void Ground0Home::paint_quick()
                         : wifi_.radio == ground0::Switch::Unknown ? "-"
                         : wifi_.ssid.empty() ? "On, not connected" : wifi_.ssid;
     live[kQuickWifi] = wifi_.radio == ground0::Switch::On;
+    value[kQuickDongle] = !dongle_.available ? "-"
+                          : !dongle_.enabled ? "Off"
+                          : dongle_.adapter.empty() ? "On, none plugged"
+                          : dongle_.monitor ? "On, " + dongle_.adapter + " busy"
+                          : dongle_.failed ? dongle_.adapter + " unstable"
+                          : dongle_.testing ? "Testing " + dongle_.adapter
+                          : dongle_.moved ? "On, using " + dongle_.adapter : "On, waiting";
+    live[kQuickDongle] = dongle_.available && dongle_.enabled;
 
     for (int i = 0; i < kQuickRows; ++i) {
         if (!quick_row_[i]) continue;
@@ -1518,6 +1538,20 @@ void Ground0Home::act_quick()
             quick_slow_in_ = on ? 5 : 2;   // joining a network takes a few seconds
         }
         break;
+    case kQuickDongle:
+        if (!dongle_.available) {
+            launcher_toast().show("Needs the installed Ground0 package");
+        } else {
+            // An adapter that failed its test is left alone; Enter here means "try it again".
+            const bool on = dongle_.failed || !dongle_.enabled;
+            ground0::set_dongle_follow(on);
+            launcher_toast().show(dongle_.failed ? "Testing the dongle again (30 s)"
+                                  : on ? "Wi-Fi will use a USB dongle once it passes a 30 s test"
+                                       : "Wi-Fi stays on the built-in radio");
+            dongle_nudges_ = 0;
+            quick_slow_in_ = 6;
+        }
+        break;
     default:
         break;
     }
@@ -1575,6 +1609,7 @@ void Ground0Home::run_command(int command)
     case kCmdKeyboard: quick_row(kQuickKeyboard); break;
     case kCmdLean: quick_row(kQuickLean); break;
     case kCmdWifi: quick_row(kQuickWifi); break;
+    case kCmdDongle: quick_row(kQuickDongle); break;
     case kCmdView:
         release_icons();
         view_ = view_ == View::Grid ? View::List : View::Grid;

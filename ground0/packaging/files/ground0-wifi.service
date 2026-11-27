@@ -1,0 +1,8 @@
+[Unit]
+Description=Ground0: make Wi-Fi follow a USB adapter
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=240
+ExecStart=/usr/lib/ground0/ground0-wifi sync

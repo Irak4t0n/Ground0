@@ -1,6 +1,9 @@
 #!/bin/sh
 set -e
 if [ "$1" = remove ] || [ "$1" = purge ] || [ "$1" = abort-install ]; then
+    rm -f /etc/ground0/wifi-follow
+    nmcli connection delete id ground0-dongle >/dev/null 2>&1 || true
+    systemctl daemon-reload 2>/dev/null || true
     dpkg-divert --package ground0 --remove --rename \
         --divert /usr/share/APPLaunch/bin/M5CardputerZero-APPLaunch.stock \
         /usr/share/APPLaunch/bin/M5CardputerZero-APPLaunch

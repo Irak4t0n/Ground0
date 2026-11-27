@@ -148,10 +148,84 @@ WifiState wifi_state()
     return state;
 }
 
+std::string wifi_helper()
+{
+    if (const char *path = std::getenv("GROUND0_WIFI_HELPER")) return path;
+    return "/usr/lib/ground0/ground0-wifi";
+}
+
+// Runs the root helper with one fixed word. Returns false when it is not installed.
+bool run_wifi_helper(const char *word)
+{
+    const std::string helper = wifi_helper();
+    if (access(helper.c_str(), X_OK) != 0) return false;
+    const char *argv[] = {"sudo", "-n", helper.c_str(), word, nullptr};
+    cp0_process_run_argv(argv, 1);
+    return true;
+}
+
 void set_wifi(bool on)
 {
+    // The launcher's own session may not be allowed to switch the radio; the helper is.
+    if (run_wifi_helper(on ? "radio-on" : "radio-off")) return;
     const char *argv[] = {"nmcli", "radio", "wifi", on ? "on" : "off", nullptr};
     cp0_process_run_argv(argv, 1);
+}
+
+bool DongleState::settled() const
+{
+    if (!available || failed || testing) return true;
+    const bool want = enabled && !adapter.empty() && !monitor;
+    return want == moved;
+}
+
+DongleState dongle_state()
+{
+    DongleState state;
+    if (const char *sim = std::getenv("GROUND0_DONGLE_SIM")) {   // "off", "none", "moved", "monitor", "testing", "failed"
+        const std::string mode = sim;
+        state.available = true;
+        state.enabled = mode != "off";
+        if (mode != "off" && mode != "none") state.adapter = "wlan1";
+        state.testing = mode == "testing";
+        state.failed = mode == "failed";
+        state.monitor = mode == "monitor";
+        state.moved = mode == "moved";
+        return state;
+    }
+    state.available = access(wifi_helper().c_str(), X_OK) == 0;
+    if (!state.available) return state;
+    state.enabled = access("/etc/ground0/wifi-follow", F_OK) == 0;
+    state.moved = access("/run/ground0-wifi", F_OK) == 0;
+    state.failed = access("/run/ground0-wifi-failed", F_OK) == 0;
+    state.testing = access("/run/ground0-wifi-trial", F_OK) == 0;
+    DIR *dir = opendir("/sys/class/net");
+    if (!dir) return state;
+    while (const dirent *entry = readdir(dir)) {
+        const std::string base = std::string("/sys/class/net/") + entry->d_name;
+        if (entry->d_name[0] == '.' || access((base + "/phy80211").c_str(), F_OK) != 0) continue;
+        char target[256] = "";
+        const ssize_t length = readlink((base + "/device/subsystem").c_str(), target, sizeof(target) - 1);
+        if (length <= 0) continue;
+        target[length] = 0;
+        const char *slash = std::strrchr(target, '/');
+        if (std::strcmp(slash ? slash + 1 : target, "usb") != 0) continue;
+        state.adapter = entry->d_name;
+        state.monitor = trimmed(slurp(base + "/type")) != "1";
+        break;
+    }
+    closedir(dir);
+    return state;
+}
+
+void set_dongle_follow(bool on)
+{
+    run_wifi_helper(on ? "on" : "off");
+}
+
+void dongle_sync()
+{
+    run_wifi_helper("sync");
 }
 
 } // namespace ground0

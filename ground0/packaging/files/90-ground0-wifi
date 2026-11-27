@@ -1,0 +1,8 @@
+#!/bin/sh
+# NetworkManager dispatcher: re-check where Wi-Fi should be whenever a
+# connection comes up or goes down (adapter plugged, unplugged, or taken into
+# monitor mode by an app).
+case "$2" in
+up|down) systemctl --no-block start ground0-wifi.service ;;
+esac
+exit 0

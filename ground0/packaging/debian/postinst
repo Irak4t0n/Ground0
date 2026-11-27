@@ -10,6 +10,13 @@ reload_users() {
 }
 if [ "$1" = configure ]; then
     reload_users
+    systemctl daemon-reload 2>/dev/null || true
+    udevadm control --reload 2>/dev/null || true
+    # Wi-Fi follows a USB adapter by default; "off" in the quick panel removes this file.
+    if [ -z "$2" ] || dpkg --compare-versions "$2" lt 0.2.0; then
+        mkdir -p /etc/ground0 && : > /etc/ground0/wifi-follow
+    fi
+    systemctl --no-block start ground0-wifi.service 2>/dev/null || true
     # The launcher is not restarted here: it may be the program running this install.
     echo "Ground0 is installed. It takes over at the next boot, or now with: ground0 on"
 fi

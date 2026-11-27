@@ -16,6 +16,7 @@ On the device ([video](ground0/docs/demo-device.mp4)):
 - **Updates built in.** Apps with a newer store version get a dot. Update one app, or all of them, without leaving the home screen. Uses the 0Hero update engine when it is installed.
 - **Radio switch.** One LoRa cap, several programs that want it. A status-bar chip shows whether MeshZero holds the radio (`MESH`) or it is free for apps (`FREE`). Apps that drive the radio themselves stop MeshZero when they open and hand it back when they close.
 - **Quick panel.** `Q` opens switches for the radio, the HDMI desktop, the keyboard handover to that desktop, lean boot and Wi-Fi.
+- **Wi-Fi follows a USB dongle.** Plug a USB Wi-Fi adapter in (USB switch on Host). Ground0 tests it for 30 seconds beside the built-in radio, then moves the network you are on over to it, with the same settings and address, and disconnects the built-in radio. Unplug it, or let an app take it into monitor mode, and the built-in radio reconnects by itself.
 - **24 themes.** Ten originals and fourteen classic desktop skins from [1999 Online](https://github.com/GoatsAndMonkeys/1999-online). Themes change chrome, fonts and layout details, not only colours.
 
 | Icon grid | Search |
@@ -70,7 +71,7 @@ Ground0 takes the stock launcher's place in `APPLaunch.service`. The stock launc
 
 If Ground0 crashes five times within a minute, the stock launcher starts instead until the next boot or `ground0 on`.
 
-The package adds one sudo rule (`/etc/sudoers.d/ground0`) so the radio switch and lean boot work without a password. It allows members of the `sudo` group to start and stop `meshzero.service` and to enable and disable `lightdm.service`, nothing else.
+The package adds a sudo rule file (`/etc/sudoers.d/ground0`) so the switches work without a password. It allows members of the `sudo` group to start and stop `meshzero.service`, to enable and disable `lightdm.service`, and to run Ground0's own Wi-Fi helper (`/usr/lib/ground0/ground0-wifi`) with its five fixed commands. Nothing else.
 
 ## Optional pieces
 
@@ -79,9 +80,11 @@ The package adds one sudo rule (`/etc/sudoers.d/ground0`) so the radio switch an
 | Updates | 0Hero from the store |
 | Radio switch | MeshZero (`meshzero.service`), or any unit named in `ground0_radio_unit` |
 | HDMI desktop, keyboard handover | [Desk Mode](https://github.com/InstantComet/cz-desk-mode) from the store |
-| Wi-Fi switch | NetworkManager (`nmcli`) |
+| Wi-Fi switch, Wi-Fi on a USB dongle | NetworkManager (`nmcli`) |
 
 A row whose piece is missing says so instead of doing nothing.
+
+**Wi-Fi on a USB dongle** is on by default and has its own row in the quick panel. It is handled by a small system service that reacts when an adapter is plugged in or pulled out, so it keeps working even if the launcher is not running. The built-in radio is not given up until the adapter has held a connection and reached the gateway for 30 seconds. An adapter that fails that test, or drops out later, is left alone (the row shows it as unstable) and the built-in radio carries on; press Enter on the row to test it again. The package also sets one driver option for MediaTek USB adapters (`mt76_usb disable_usb_sg=1`, in `/usr/lib/modprobe.d/ground0-mt76-usb.conf`). Without it those adapters reset themselves on the Cardputer Zero's USB port after a few seconds of traffic; it takes effect the next time the adapter is plugged in or the device boots.
 
 **Lean boot** stops the Raspberry Pi desktop (LightDM) from loading in the background at boot. On the Cardputer Zero's 352 MB of RAM that desktop holds roughly 50 MB. With Desk Mode installed, the HDMI desktop still starts when you ask for it.
 
@@ -111,7 +114,7 @@ scons -j8
 export CardputerZero=y CONFIG_REPO_AUTOMATION=y
 scons -j8
 # package
-../../ground0/packaging/build-deb.sh dist/M5CardputerZero-APPLaunch 0.1.0
+../../ground0/packaging/build-deb.sh dist/M5CardputerZero-APPLaunch 0.2.2
 ```
 
 Simulator switches for testing without the hardware: `GROUND0_RADIO_SIM=mesh|free`, `GROUND0_DESK_DIR=<folder>`, `GROUND0_HDMI_SIM=1`, `GROUND0_LEAN_SIM=0|1`, `GROUND0_APPS_DIR=<folder>`.

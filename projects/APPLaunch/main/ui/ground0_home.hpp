@@ -139,7 +139,7 @@ private:
     lv_obj_t *foot_label_ = nullptr;
     lv_obj_t *chip_label_ = nullptr;
 
-    static constexpr int kQuickRows = 6;
+    static constexpr int kQuickRows = 7;
     lv_obj_t *quick_panel_ = nullptr;
     lv_obj_t *quick_row_[kQuickRows] = {};
     lv_obj_t *quick_name_[kQuickRows] = {};
@@ -151,6 +151,8 @@ private:
     ground0::DeskState desk_;
     ground0::Switch lean_ = ground0::Switch::Unknown;
     ground0::WifiState wifi_;
+    ground0::DongleState dongle_;
+    int dongle_nudges_ = 0;         // sync requests sent for the current mismatch
     bool keyboard_away_ = false;    // the keyboard is typing on the HDMI desktop
     lv_obj_t *radio_chip_ = nullptr;
     lv_obj_t *radio_label_ = nullptr;

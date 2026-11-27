@@ -14,6 +14,11 @@ install -D -m 0755 "$HERE/files/ground0-run" "$ROOT/usr/lib/ground0/ground0-run"
 install -D -m 0755 "$HERE/files/ground0" "$ROOT/usr/bin/ground0"
 install -D -m 0644 "$HERE/files/10-ground0.conf" "$ROOT/usr/lib/systemd/user/APPLaunch.service.d/10-ground0.conf"
 install -D -m 0440 "$HERE/files/sudoers" "$ROOT/etc/sudoers.d/ground0"
+install -D -m 0755 "$HERE/files/ground0-wifi" "$ROOT/usr/lib/ground0/ground0-wifi"
+install -D -m 0644 "$HERE/files/ground0-wifi.service" "$ROOT/usr/lib/systemd/system/ground0-wifi.service"
+install -D -m 0755 "$HERE/files/90-ground0-wifi" "$ROOT/usr/lib/NetworkManager/dispatcher.d/90-ground0-wifi"
+install -D -m 0644 "$HERE/files/70-ground0-wifi.rules" "$ROOT/usr/lib/udev/rules.d/70-ground0-wifi.rules"
+install -D -m 0644 "$HERE/files/ground0-mt76-usb.conf" "$ROOT/usr/lib/modprobe.d/ground0-mt76-usb.conf"
 install -D -m 0644 "$SHARE/ground0/ground0-helper.py" "$ROOT/usr/share/ground0/ground0-helper.py"
 mkdir -p "$ROOT/usr/share/ground0/fonts" "$ROOT/usr/share/doc/ground0" "$ROOT/DEBIAN"
 cp "$SHARE"/font/ground0/* "$ROOT/usr/share/ground0/fonts/"
@@ -30,5 +35,5 @@ install -m 0644 "$HERE/../../ext_components/Miniaudio/LICENSE" "$ROOT/usr/share/
 sed "s/@VERSION@/$VERSION/" "$HERE/debian/control.in" > "$ROOT/DEBIAN/control"
 echo "Installed-Size: $(du -sk "$ROOT/usr" | cut -f1)" >> "$ROOT/DEBIAN/control"
 echo "/etc/sudoers.d/ground0" > "$ROOT/DEBIAN/conffiles"
-for script in preinst postinst postrm; do install -m 0755 "$HERE/debian/$script" "$ROOT/DEBIAN/$script"; done
+for script in preinst postinst prerm postrm; do install -m 0755 "$HERE/debian/$script" "$ROOT/DEBIAN/$script"; done
 dpkg-deb --root-owner-group -Zxz --build "$ROOT" "$OUT/ground0_${VERSION}_arm64.deb"

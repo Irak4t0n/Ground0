@@ -1,0 +1,7 @@
+#!/bin/sh
+set -e
+# Give Wi-Fi back to the built-in radio before the helper goes away.
+if [ "$1" = remove ]; then
+    rm -f /etc/ground0/wifi-follow
+    /usr/lib/ground0/ground0-wifi sync >/dev/null 2>&1 || true
+fi

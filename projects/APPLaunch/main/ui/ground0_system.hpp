@@ -45,4 +45,23 @@ struct WifiState
 WifiState wifi_state();
 void set_wifi(bool on);
 
+// Wi-Fi follows a USB adapter: while one is plugged in and in normal mode the
+// network moves to it and the built-in radio disconnects (see
+// ground0/packaging/files/ground0-wifi). Read from sysfs and two small files,
+// so it is cheap enough for the status tick.
+struct DongleState
+{
+    bool available = false;   // the helper is installed
+    bool enabled = false;     // the behaviour is switched on
+    std::string adapter;      // USB Wi-Fi interface name, empty when none is plugged in
+    bool monitor = false;     // an app has the adapter in monitor mode
+    bool moved = false;       // Wi-Fi is on the adapter now
+    bool testing = false;     // the adapter is on trial beside the built-in radio
+    bool failed = false;      // the adapter did not hold a connection; left alone until asked again
+    bool settled() const;     // nothing for the helper to do
+};
+DongleState dongle_state();
+void set_dongle_follow(bool on);
+void dongle_sync();
+
 } // namespace ground0

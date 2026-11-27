@@ -1,0 +1,2 @@
+# Ground0: a Wi-Fi adapter was plugged in or pulled out.
+ACTION=="add|remove", SUBSYSTEM=="net", ENV{DEVTYPE}=="wlan", RUN+="/usr/bin/systemctl --no-block start ground0-wifi.service"
