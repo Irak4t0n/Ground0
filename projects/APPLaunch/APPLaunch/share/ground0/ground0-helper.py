@@ -87,6 +87,8 @@ def build_index():
     apps = registry()
     by_uuid = {a.get("uuid"): a for a in apps if a.get("uuid")}
     by_pkg = {(a.get("download") or {}).get("package"): a for a in apps}
+    by_pkg.pop(None, None)      # an app without a package name must not match apps without one
+    by_pkg.pop("", None)
 
     store = {}   # desktop path -> (uuid, package, installed version)
     try:
@@ -106,7 +108,7 @@ def build_index():
         if not f.get("Exec"):
             continue
         uuid, package, have = store.get(os.path.realpath(desk), ("", "", ""))
-        entry = by_uuid.get(uuid) or by_pkg.get(package) if (uuid or package) else None
+        entry = by_uuid.get(uuid) or (by_pkg.get(package) if package else None)
         category, new = "", ""
         if entry:
             category = (entry.get("categories") or [""])[0]

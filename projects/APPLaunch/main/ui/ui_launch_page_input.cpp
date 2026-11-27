@@ -91,7 +91,6 @@ void UILaunchPage::handle_home_key(lv_event_t *event)
             ground0::Radio &radio = ground0::Radio::instance();
             const app *entry = launch_->app_at(ground0_->selected());
             const auto need = entry ? radio.need_for(entry->Name, entry->Exec) : ground0::Radio::Need::None;
-            bool restore_mesh = false;
             if (need != ground0::Radio::Need::None && radio.poll() != ground0::RadioState::Absent) {
                 const bool want_mesh = need == ground0::Radio::Need::Mesh;
                 if ((radio.state() == ground0::RadioState::Mesh) != want_mesh) {
@@ -99,30 +98,15 @@ void UILaunchPage::handle_home_key(lv_event_t *event)
                     lv_refr_now(nullptr);
                     radio.set_blocking(want_mesh);
                     ui_loading::hide();
-                    restore_mesh = !want_mesh && radio.restore_after_app();
-                    if (restore_mesh) radio.set_owed(true);
+                    if (!want_mesh && radio.restore_after_app()) radio.set_owed(true);
                 }
             }
 
-            const auto started = std::chrono::steady_clock::now();
             launch_selected_app();
-            // An external app blocks until it exits. A call that returns at once
-            // opened a built-in page or terminal instead, which is still running,
-            // so the radio stays as it is.
-            const bool app_has_exited =
-                std::chrono::steady_clock::now() - started > std::chrono::seconds(2);
-            const bool restoring = restore_mesh && app_has_exited;
-            if (restoring) {
-                radio.request(true);
-                radio.set_owed(false);
-            }
-            if (ground0_ && ground0_->valid()) {
-                // The daemon takes a moment to come up: show it as pending, not FREE.
-                if (restoring)
-                    ground0_->expect_radio(true);
-                else
-                    ground0_->refresh_radio();
-            }
+            // Whenever the launcher is back on its home screen (the app exited,
+            // failed to start, or its page was closed) show_home_screen() has
+            // already given the radio back; see settle_radio_debt().
+            if (ground0_ && ground0_->valid()) ground0_->refresh_radio();
         }
         return;
     }
@@ -206,4 +190,18 @@ void UILaunchPage::on_home_key(lv_event_t *event) noexcept
         if (UILaunchPage *self = page_from_event(event)) self->handle_home_key(event);
     } catch (...) {
     }
+}
+
+// Ground0 stopped the mesh daemon for an app that needed the radio free. Now
+// that the launcher is home again, start it. Called from show_home_screen(),
+// which every way back home goes through: an external app exiting (however
+// quickly), a launch that failed, a terminal or built-in page being closed.
+void UILaunchPage::settle_radio_debt()
+{
+    ground0::Radio &radio = ground0::Radio::instance();
+    if (!radio.owed()) return;
+    radio.set_owed(false);
+    if (radio.poll() != ground0::RadioState::Free) return;
+    radio.request(true);
+    if (ground0_ && ground0_->valid()) ground0_->expect_radio(true);
 }

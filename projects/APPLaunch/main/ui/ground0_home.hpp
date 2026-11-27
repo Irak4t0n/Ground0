@@ -92,6 +92,7 @@ private:
     void bind_list();
     void bind_grid();
     void update_status();
+    void paint_status();
     void paint_radio();
     void toggle_radio();
     void move(int delta);

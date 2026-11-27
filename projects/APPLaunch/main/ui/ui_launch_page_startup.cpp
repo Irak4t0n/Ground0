@@ -36,6 +36,7 @@ void UILaunchPage::show_home_screen()
     use_bold_home_title_font();
     lv_disp_load_scr(screen());
     bind_home_input_group();
+    settle_radio_debt();
 }
 
 void UILaunchPage::load_home_screen()

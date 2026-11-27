@@ -18,6 +18,12 @@
 
 namespace ground0 {
 
+// Start a command and return at once, with its output discarded. The launcher's
+// own background runner never collects its children, which leaves a defunct
+// process behind for each one; these are collected by reap_background().
+void run_background(const char *const *argv);
+void reap_background();
+
 enum class Switch { Unknown, On, Off };
 
 struct DeskState

@@ -6,7 +6,7 @@ Section: misc
 Priority: optional
 Pre-Depends: dpkg (>= 1.19)
 Depends: applaunch, python3, curl, sudo, systemd
-Recommends: cz-desk-mode, network-manager
+Recommends: cz-desk-mode, network-manager, iputils-ping, util-linux
 Homepage: https://github.com/Irak4t0n/Ground0
 Description: Ground0 home screen for the M5Stack Cardputer Zero
  A replacement home screen for the Cardputer Zero launcher: app list and icon

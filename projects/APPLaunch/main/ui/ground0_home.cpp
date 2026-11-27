@@ -357,6 +357,7 @@ Ground0Home::Ground0Home(lv_obj_t *parent, IconLookup lookup)
     status_timer_ = lv_timer_create(on_status_timer, 15000, this);
     rebuild_tabs(saved_tab_);
     rebuild();
+    update_status();
     request_index();
     // A free-radio app was still open when Ground0 last stopped: give the radio back now.
     ground0::Radio &radio = ground0::Radio::instance();
@@ -551,7 +552,7 @@ void Ground0Home::rebuild()
     else
         build_list();
     build_footer();
-    update_status();
+    paint_status();
     bind();
     if (quick_open_) build_quick();
 }
@@ -607,7 +608,14 @@ void Ground0Home::build_bar()
     lv_obj_move_foreground(zero);
 
     const lv_font_t *status = chip_font();
-    const uint32_t status_color = t.title_tab ? (is_dark(t.desk) ? 0xffffff : 0x000000) : t.bar_text;
+    // Clock, battery and radio chip sit at the right end of the bar. On a bar that
+    // fades sideways the title colour may not read there (white on Windows ME's
+    // pale blue end), so pick black or white against what is actually under them.
+    uint32_t status_color = t.title_tab ? (is_dark(t.desk) ? 0xffffff : 0x000000) : t.bar_text;
+    if (!t.title_tab) {
+        const uint32_t under = t.bar_fill == ground0::Fill::GradH ? t.bar_b : t.bar;
+        if (!reads_on(status_color, under)) status_color = is_dark(under) ? 0xffffff : 0x000000;
+    }
     const int status_y = centred(kBarH, status);
     clock_ = text(root_, kScreenW - 44, status_y, 38, status, status_color, "--:--", LV_TEXT_ALIGN_RIGHT);
     battery_ = text(root_, kScreenW - 84, status_y, 38, status, status_color, "", LV_TEXT_ALIGN_RIGHT);
@@ -981,18 +989,26 @@ void Ground0Home::update_status()
         if (!away && root_) lv_obj_invalidate(root_);
     }
     if (keyboard_away_) return;
+    ground0::reap_background();
     // The system hooks normally move Wi-Fi by themselves. If the state still
-    // disagrees with what is plugged in (an app left monitor mode without any
-    // network event), ask the helper to look again, a few times at most.
+    // disagrees with what is plugged in (an app gave the adapter back without
+    // any network event), ask the helper to look again: four times quickly,
+    // then once a minute.
     const ground0::DongleState dongle = ground0::dongle_state();
     if (dongle.settled()) {
         dongle_nudges_ = 0;
-    } else if (dongle_nudges_ < 4) {
-        ++dongle_nudges_;
+    } else if (++dongle_nudges_ <= 4 || dongle_nudges_ % 4 == 0) {
         ground0::dongle_sync();
     }
     if (!radio_pending_) refresh_radio();
     if (!updating_ && file_stamp(cache_path("index.tsv")) != index_stamp_) apply_index();
+    paint_status();
+}
+
+// Clock and battery only: cheap enough to run on every rebuild.
+void Ground0Home::paint_status()
+{
+    if (keyboard_away_) return;
     if (clock_) {
         char buffer[8] = "--:--";
         const std::time_t now = std::time(nullptr);
@@ -1025,7 +1041,12 @@ void Ground0Home::move(int delta)
 Ground0Home::Action Ground0Home::handle_key(const struct key_item &item)
 {
     if (!root_) return Action::None;
-    if (updating_) return Action::Handled;   // an update is running: keys wait
+    if (updating_) {
+        // An update is running: keys wait. Esc stops waiting; the update itself carries on.
+        if (item.key_code == KEY_ESC && item.key_state == KBD_KEY_PRESSED)
+            finish_update("Update continues in the background");
+        return Action::Handled;
+    }
     if (quick_open_) return handle_quick_key(item);
     if (searching_) return handle_search_key(item);
 
@@ -1292,7 +1313,7 @@ void Ground0Home::request_index()
     const std::string helper = helper_path();
     if (access(helper.c_str(), R_OK) != 0) return;
     const char *argv[] = {"python3", helper.c_str(), "index", nullptr};
-    cp0_process_run_argv(argv, 1);
+    ground0::run_background(argv);
 }
 
 void Ground0Home::start_update(const std::vector<std::string> &uuids)
@@ -1308,7 +1329,7 @@ void Ground0Home::start_update(const std::vector<std::string> &uuids)
     }
     argv.push_back(nullptr);
     unlink(cache_path("update.log").c_str());
-    cp0_process_run_argv(argv.data(), 1);
+    ground0::run_background(argv.data());
     updating_ = true;
     update_ticks_ = 0;
     launcher_toast().show_persistent("Updating...");
@@ -1320,8 +1341,6 @@ void Ground0Home::finish_update(const std::string &message)
     updating_ = false;
     if (update_timer_) lv_timer_delete(update_timer_);
     update_timer_ = nullptr;
-    if (quick_timer_) lv_timer_delete(quick_timer_);
-    quick_timer_ = nullptr;
     launcher_toast().show(message.c_str());
     if (root_) apply_index();
 }
@@ -1335,12 +1354,15 @@ void Ground0Home::on_update_timer(lv_timer_t *timer) noexcept
         std::string line, last;
         while (std::getline(in, line))
             if (!line.empty()) last = line;
+        const auto rest = [&last](std::size_t from) { return last.size() > from ? last.substr(from) : std::string(); };
         if (last.rfind("RESULT ok", 0) == 0) {
-            self->finish_update("Updated: " + last.substr(10));
+            self->finish_update("Updated: " + rest(10));
         } else if (last.rfind("RESULT failed", 0) == 0) {
-            self->finish_update("Update failed: " + last.substr(14));
+            self->finish_update("Update failed: " + rest(14));
         } else if (++self->update_ticks_ > 1500) {   // 20 minutes without a result
             self->finish_update("Update did not finish");
+        } else if (last.empty() && self->update_ticks_ > 25) {   // 20 s and the updater has written nothing
+            self->finish_update("The updater did not start");
         } else if (last.rfind("STATUS ", 0) == 0) {
             launcher_toast().show_persistent(last.substr(7).c_str());
         }
@@ -1545,8 +1567,8 @@ void Ground0Home::act_quick()
             // An adapter that failed its test is left alone; Enter here means "try it again".
             const bool on = dongle_.failed || !dongle_.enabled;
             ground0::set_dongle_follow(on);
-            launcher_toast().show(dongle_.failed ? "Testing the dongle again (30 s)"
-                                  : on ? "Wi-Fi will use a USB dongle once it passes a 30 s test"
+            launcher_toast().show(dongle_.failed ? "Testing the dongle again, about a minute"
+                                  : on ? "Wi-Fi will use a USB dongle once it passes a test"
                                        : "Wi-Fi stays on the built-in radio");
             dongle_nudges_ = 0;
             quick_slow_in_ = 6;

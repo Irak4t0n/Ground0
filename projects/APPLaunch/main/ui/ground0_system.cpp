@@ -15,11 +15,20 @@
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 #include <unistd.h>
+#include <vector>
 
 namespace ground0 {
 
 namespace {
+
+std::vector<pid_t> &children()
+{
+    static std::vector<pid_t> list;
+    return list;
+}
 
 std::string desk_dir()
 {
@@ -89,6 +98,39 @@ std::string capture(const char *const *argv)
 
 } // namespace
 
+void run_background(const char *const *argv)
+{
+    if (!argv || !argv[0]) return;
+    reap_background();
+    const pid_t pid = fork();
+    if (pid == 0) {
+        const int null = open("/dev/null", O_RDWR);
+        if (null >= 0) {
+            dup2(null, STDIN_FILENO);
+            dup2(null, STDOUT_FILENO);
+            dup2(null, STDERR_FILENO);
+            if (null > STDERR_FILENO) close(null);
+        }
+        execvp(argv[0], const_cast<char *const *>(argv));
+        _exit(127);
+    }
+    if (pid > 0) children().push_back(pid);
+}
+
+void reap_background()
+{
+    std::vector<pid_t> &list = children();
+    for (std::size_t i = 0; i < list.size();) {
+        // Only our own children are waited for, by number, so nothing else in
+        // the launcher loses the exit status of a process it started.
+        const pid_t done = waitpid(list[i], nullptr, WNOHANG);
+        if (done != 0)
+            list.erase(list.begin() + static_cast<std::ptrdiff_t>(i));
+        else
+            ++i;
+    }
+}
+
 DeskState desk_state()
 {
     DeskState state;
@@ -131,7 +173,7 @@ void set_lean_boot(bool on)
 {
     // Only the boot setting changes: a desktop that is already running stays up.
     const char *argv[] = {"sudo", "-n", "systemctl", on ? "disable" : "enable", "lightdm.service", nullptr};
-    cp0_process_run_argv(argv, 1);
+    run_background(argv);
 }
 
 WifiState wifi_state()
@@ -160,7 +202,7 @@ bool run_wifi_helper(const char *word)
     const std::string helper = wifi_helper();
     if (access(helper.c_str(), X_OK) != 0) return false;
     const char *argv[] = {"sudo", "-n", helper.c_str(), word, nullptr};
-    cp0_process_run_argv(argv, 1);
+    run_background(argv);
     return true;
 }
 
@@ -169,7 +211,7 @@ void set_wifi(bool on)
     // The launcher's own session may not be allowed to switch the radio; the helper is.
     if (run_wifi_helper(on ? "radio-on" : "radio-off")) return;
     const char *argv[] = {"nmcli", "radio", "wifi", on ? "on" : "off", nullptr};
-    cp0_process_run_argv(argv, 1);
+    run_background(argv);
 }
 
 bool DongleState::settled() const

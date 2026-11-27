@@ -7,6 +7,7 @@
 #include "ground0_radio.hpp"
 
 #include "cp0_lvgl_app.h"
+#include "ground0_system.hpp"
 #include "ui.h"
 
 #include <algorithm>
@@ -102,7 +103,11 @@ bool Radio::run(bool mesh_on, bool background)
     // -n: never prompt. Without a sudo rule for this the request fails quietly
     // and the next poll shows the unchanged state.
     const char *argv[] = {"sudo", "-n", "systemctl", mesh_on ? "start" : "stop", unit_.c_str(), nullptr};
-    return cp0_process_run_argv(argv, background ? 1 : 0) == 0;
+    if (background) {
+        run_background(argv);
+        return true;
+    }
+    return cp0_process_run_argv(argv, 0) == 0;
 }
 
 void Radio::set_owed(bool owed)
@@ -136,9 +141,10 @@ Radio::Need Radio::need_for(const std::string &name, const std::string &exec) co
     std::stringstream tokens(exec);
     std::string token;
     while (tokens >> token) {
-        if (token.empty() || token[0] != '/') continue;
+        // Any word with a path in it ("/usr/bin/x", "bin/x"), and the first word.
         const std::size_t slash = token.find_last_of('/');
-        keys.push_back(lower(token.substr(slash + 1)));
+        if (slash == std::string::npos && keys.size() > 1) continue;
+        keys.push_back(lower(slash == std::string::npos ? token : token.substr(slash + 1)));
     }
     auto listed = [&](const std::vector<std::string> &list) {
         return std::any_of(keys.begin(), keys.end(), [&](const std::string &key) {
