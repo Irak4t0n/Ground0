@@ -1476,6 +1476,7 @@ void Ground0Home::paint_quick()
     value[kQuickDongle] = !dongle_.available ? "-"
                           : !dongle_.enabled ? "Off"
                           : dongle_.adapter.empty() ? "On, none plugged"
+                          : dongle_.lent ? "Lent to an app"
                           : dongle_.monitor ? "On, " + dongle_.adapter + " busy"
                           : dongle_.failed ? dongle_.adapter + " unstable"
                           : dongle_.testing ? "Testing " + dongle_.adapter

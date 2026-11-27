@@ -7,7 +7,10 @@
 #include "ground0_system.hpp"
 
 #include "ui.h"
+#include "cp0_lvgl_app.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -216,7 +219,7 @@ void set_wifi(bool on)
 
 bool DongleState::settled() const
 {
-    if (!available || failed || testing) return true;
+    if (!available || failed || testing || lent) return true;
     const bool want = enabled && !adapter.empty() && !monitor;
     return want == moved;
 }
@@ -242,6 +245,7 @@ DongleState dongle_state()
     state.moved = access("/run/ground0-wifi", F_OK) == 0;
     state.failed = access("/run/ground0-wifi-failed", F_OK) == 0;
     state.testing = access("/run/ground0-wifi-trial", F_OK) == 0;
+    state.lent = access("/run/ground0-wifi-lent", F_OK) == 0;
     DIR *dir = opendir("/sys/class/net");
     if (!dir) return state;
     while (const dirent *entry = readdir(dir)) {
@@ -269,6 +273,72 @@ void set_dongle_follow(bool on)
 void dongle_sync()
 {
     run_wifi_helper("sync");
+}
+
+namespace {
+
+std::string dongle_config(const char *key, std::string value)
+{
+    cp0_signal_config_api({"GetStr", key, value},
+                          [&](int code, std::string data) { if (code == 0) value = std::move(data); });
+    return value;
+}
+
+std::string lowered(std::string value)
+{
+    for (char &c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return value;
+}
+
+} // namespace
+
+bool dongle_app(const std::string &name, const std::string &exec)
+{
+    // Same matching as the LoRa radio lists: the app name, or the file name of
+    // any path in its Exec line (and its first word), compared whole.
+    std::vector<std::string> keys = {lowered(name)};
+    std::stringstream tokens(exec);
+    std::string token;
+    while (tokens >> token) {
+        const std::size_t slash = token.find_last_of('/');
+        if (slash == std::string::npos && keys.size() > 1) continue;
+        keys.push_back(lowered(slash == std::string::npos ? token : token.substr(slash + 1)));
+    }
+    std::stringstream list(lowered(dongle_config(
+        "ground0_dongle_apps",
+        "marauder,marauder_cardputerzero,zerogotchi,lokicz,lokictl,quartermaster,raspyjack,run-raspyjack.sh")));
+    std::string word;
+    while (std::getline(list, word, ',')) {
+        const std::size_t first = word.find_first_not_of(" \t");
+        if (first == std::string::npos) continue;
+        word = word.substr(first, word.find_last_not_of(" \t") - first + 1);
+        if (std::find(keys.begin(), keys.end(), word) != keys.end()) return true;
+    }
+    return false;
+}
+
+void dongle_lend()
+{
+    const std::string helper = wifi_helper();
+    if (access(helper.c_str(), X_OK) != 0) return;
+    const char *argv[] = {"sudo", "-n", helper.c_str(), "lend", nullptr};
+    cp0_process_run_argv(argv, 0);
+}
+
+void dongle_return()
+{
+    run_wifi_helper("return");
+}
+
+void set_dongle_owed(bool owed)
+{
+    cp0_signal_config_api({"SetStr", "ground0_dongle_owed", owed ? "1" : "0"}, [](int, std::string) {});
+    cp0_signal_config_api({"Save"}, [](int, std::string) {});
+}
+
+bool dongle_owed()
+{
+    return dongle_config("ground0_dongle_owed", "0") == "1";
 }
 
 } // namespace ground0

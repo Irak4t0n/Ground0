@@ -5,6 +5,8 @@
 #   sync       make Wi-Fi follow a plugged-in USB adapter, or give it back
 #   on | off   switch that behaviour on (also: try the adapter again) or off
 #   radio-on | radio-off   switch Wi-Fi itself
+#   lend | return   leave the adapter idle for an app that wants it for itself
+#                   (monitor mode), then take it back when that app has closed
 #
 # "Follow" means: while a USB Wi-Fi adapter is plugged in and in normal
 # (managed) mode, the network the built-in radio is on moves to the adapter,
@@ -20,11 +22,19 @@
 #     again (or the next boot). A dropping adapter is not retried in a loop.
 # An app taking the adapter (monitor mode, or away from NetworkManager), or
 # unplugging it, is not a failure: the built-in radio reconnects and the adapter is used again later.
+#
+# Some apps only take an adapter that is idle, and refuse one that is carrying
+# a connection. For those the launcher asks for "lend" before it starts the
+# app: Wi-Fi goes back to the built-in radio and the adapter is left
+# disconnected, whichever profile had it. Nothing here touches the adapter
+# again until "return", which the launcher asks for when it is home again.
 FLAG=/etc/ground0/wifi-follow
 STATE=/run/ground0-wifi            # "<profile uuid> <adapter ifindex>" while moved
 TRYING=/run/ground0-wifi-trial     # exists during the trial
 FAILED=/run/ground0-wifi-failed    # why the adapter is being left alone
 LOST=/run/ground0-wifi-lost        # when the adapter vanished while it had the network
+LENT=/run/ground0-wifi-lent        # an app has the adapter: "<ifindex left idle>"
+PROVEN=/run/ground0-wifi-proven    # ifindex of an adapter that passed its trial and was lent
 CLONE=ground0-dongle
 TRIAL=30
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -97,6 +107,7 @@ trial() {
     waited=0; bad=0
     while [ "$ok" = 1 ] && [ "$waited" -lt "$TRIAL" ]; do
         sleep 3; waited=$((waited + 3))
+        [ -e "$LENT" ] && { ok=0; break; }        # an app wants the adapter: stop at once
         [ "$(ifindex "$usb")" = "$index" ] || { ok=0; break; }
         good=1
         connected "$usb" || good=0
@@ -122,10 +133,29 @@ move() {
     nmcli --wait 30 connection up id "$CLONE" ifname "$usb" >/dev/null 2>&1
 }
 
+# Leave the adapter idle: disconnected, and kept that way. Switching the
+# device's autoconnect off stops any other profile (wlan1-Howards and the like)
+# from rejoining it a second later, which is what an app in monitor mode needs.
+idle() {
+    [ -n "$usb" ] || return 0
+    busy "$usb" && return 0
+    nmcli device set "$usb" autoconnect no >/dev/null 2>&1
+    nmcli -g GENERAL.STATE device show "$usb" 2>/dev/null | grep -q '^30 ' && return 0
+    nmcli device disconnect "$usb" >/dev/null 2>&1
+}
+
 sync_once() {
     # With Wi-Fi switched off nothing can connect: leave everything as it is.
     [ "$(nmcli radio wifi 2>/dev/null)" = enabled ] || return 0
     adapters
+    if [ -e "$LENT" ]; then
+        # An app has the adapter. One that is plugged in (or comes back) while
+        # the app is open is left idle once, then not touched again.
+        if [ -n "$usb" ] && [ "$(cat "$LENT")" != "$(ifindex "$usb")" ]; then
+            idle; ifindex "$usb" > "$LENT"
+        fi
+        return 0
+    fi
     [ -n "$onboard" ] || return 0
 
     if [ -e "$STATE" ]; then
@@ -168,11 +198,20 @@ sync_once() {
     src=$(active_uuid "$onboard")
     [ -n "$src" ] || return 0          # the built-in radio is on no network: nothing to move
 
-    log "USB adapter ($usb) found: testing it for ${TRIAL}s beside the built-in Wi-Fi"
-    if ! trial "$src"; then
-        give_up "it did not hold a connection for ${TRIAL}s"
-        connected "$onboard" || restore
-        return 0
+    # The same adapter (same interface number: never unplugged, never reset)
+    # coming back from an app has already passed its trial.
+    proven=$(cat "$PROVEN" 2>/dev/null); rm -f "$PROVEN"
+    if [ -n "$proven" ] && [ "$proven" = "$(ifindex "$usb")" ]; then
+        log "USB adapter ($usb) is back from an app: moving Wi-Fi to it again"
+    else
+        log "USB adapter ($usb) found: testing it for ${TRIAL}s beside the built-in Wi-Fi"
+        if ! trial "$src"; then
+            [ -e "$LENT" ] && return 0             # interrupted for an app, not a failure
+            give_up "it did not hold a connection for ${TRIAL}s"
+            connected "$onboard" || restore
+            return 0
+        fi
+        [ -e "$LENT" ] && return 0
     fi
     if move "$src"; then
         log "Wi-Fi moved to the USB adapter ($usb)"
@@ -190,7 +229,9 @@ sync)
     sync_once; sleep 2; sync_once ;;
 on)
     mkdir -p /etc/ground0 && : > "$FLAG"
-    rm -f "$FAILED" "$LOST"
+    rm -f "$FAILED" "$LOST" "$PROVEN" "$LENT"
+    adapters
+    [ -n "$usb" ] && nmcli device set "$usb" autoconnect yes >/dev/null 2>&1
     systemctl --no-block start ground0-wifi.service 2>/dev/null || "$0" sync ;;
 off)
     rm -f "$FLAG" "$FAILED"
@@ -201,5 +242,35 @@ radio-on)
     sleep 3
     systemctl --no-block start ground0-wifi.service 2>/dev/null || true ;;
 radio-off) nmcli radio wifi off ;;
-*) echo "usage: ground0-wifi sync | on | off | radio-on | radio-off"; exit 2 ;;
+lend)
+    # The marker first: a trial that is running sees it and stops within seconds.
+    [ -e "$LENT" ] || echo 0 > "$LENT"
+    exec 9>/run/ground0-wifi.lock
+    flock -w 20 9 || true
+    adapters
+    if [ -n "$usb" ]; then
+        if [ -e "$STATE" ] && [ "$(cut -d' ' -f2 "$STATE")" = "$(ifindex "$usb")" ]; then
+            ifindex "$usb" > "$PROVEN"             # it has passed its trial
+        fi
+        idle
+        ifindex "$usb" > "$LENT"
+        log "USB adapter ($usb) left idle for an app"
+    fi
+    if [ "$(nmcli radio wifi 2>/dev/null)" = enabled ]; then
+        if [ -e "$STATE" ]; then restore
+        elif [ -n "$onboard" ] && ! connected "$onboard"; then
+            nmcli device set "$onboard" autoconnect yes >/dev/null 2>&1
+            nmcli --wait 25 device connect "$onboard" >/dev/null 2>&1
+        fi
+    fi ;;
+return)
+    [ -e "$LENT" ] || exit 0
+    rm -f "$LENT" "$LOST"
+    adapters
+    if [ -n "$usb" ]; then
+        nmcli device set "$usb" autoconnect yes >/dev/null 2>&1
+        log "USB adapter ($usb) is back from an app"
+    fi
+    systemctl --no-block start ground0-wifi.service 2>/dev/null || "$0" sync ;;
+*) echo "usage: ground0-wifi sync | on | off | radio-on | radio-off | lend | return"; exit 2 ;;
 esac

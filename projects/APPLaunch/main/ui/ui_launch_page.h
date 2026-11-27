@@ -83,6 +83,7 @@ private:
     void create_app_container(lv_obj_t *parent);
     void sync_ground0();
     void settle_radio_debt();
+    void settle_dongle_debt();
     void switch_left();
     void switch_right();
     void fill_left_entering_slot(lv_obj_t *panel, lv_obj_t *label);

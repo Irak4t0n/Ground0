@@ -84,7 +84,11 @@ The package adds a sudo rule file (`/etc/sudoers.d/ground0`) so the switches wor
 
 A row whose piece is missing says so instead of doing nothing.
 
-**Wi-Fi on a USB dongle** is on by default and has its own row in the quick panel. It is handled by a small system service that reacts when an adapter is plugged in or pulled out, so it keeps working even if the launcher is not running. The built-in radio is not given up until the adapter has joined the network, held the connection and kept answering from the gateway for 30 seconds (about a minute in all). An adapter that fails that test, or drops out later, is left alone (the row shows it as unstable) and the built-in radio carries on; press Enter on the row to test it again. The package also sets one driver option for MediaTek USB adapters (`mt76_usb disable_usb_sg=1`, in `/usr/lib/modprobe.d/ground0-mt76-usb.conf`). Without it those adapters reset themselves on the Cardputer Zero's USB port after a few seconds of traffic; it takes effect the next time the adapter is plugged in or the device boots.
+**Wi-Fi on a USB dongle** is on by default and has its own row in the quick panel. It is handled by a small system service that reacts when an adapter is plugged in or pulled out, so it keeps working even if the launcher is not running. The built-in radio is not given up until the adapter has joined the network, held the connection and kept answering from the gateway for 30 seconds (about a minute in all). An adapter that fails that test, or drops out later, is left alone (the row shows it as unstable) and the built-in radio carries on; press Enter on the row to test it again.
+
+**Apps that want the adapter for themselves.** Some tools (Marauder, for one) only take a Wi-Fi adapter that is idle and refuse one that is carrying a connection. Before Ground0 starts one of those it moves Wi-Fi back to the built-in radio and leaves the adapter disconnected; when you are back on the home screen it moves Wi-Fi to the adapter again, without repeating the test if the adapter was never unplugged. The apps are listed in the launcher's config key `ground0_dongle_apps` (comma separated app names or program file names; default `marauder,marauder_cardputerzero,zerogotchi,lokicz,lokictl,quartermaster,raspyjack,run-raspyjack.sh`).
+
+The package also sets one driver option for MediaTek USB adapters (`mt76_usb disable_usb_sg=1`, in `/usr/lib/modprobe.d/ground0-mt76-usb.conf`). Without it those adapters reset themselves on the Cardputer Zero's USB port after a few seconds of traffic; it takes effect the next time the adapter is plugged in or the device boots.
 
 **Lean boot** stops the Raspberry Pi desktop (LightDM) from loading in the background at boot. On the Cardputer Zero's 352 MB of RAM that desktop holds roughly 50 MB. With Desk Mode installed, the HDMI desktop still starts when you ask for it.
 
@@ -114,7 +118,7 @@ scons -j8
 export CardputerZero=y CONFIG_REPO_AUTOMATION=y
 scons -j8
 # package
-../../ground0/packaging/build-deb.sh dist/M5CardputerZero-APPLaunch 0.2.6
+../../ground0/packaging/build-deb.sh dist/M5CardputerZero-APPLaunch 0.2.7
 ```
 
 Simulator switches for testing without the hardware: `GROUND0_RADIO_SIM=mesh|free`, `GROUND0_DESK_DIR=<folder>`, `GROUND0_HDMI_SIM=1`, `GROUND0_LEAN_SIM=0|1`, `GROUND0_APPS_DIR=<folder>`.

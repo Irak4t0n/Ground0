@@ -64,10 +64,22 @@ struct DongleState
     bool moved = false;       // Wi-Fi is on the adapter now
     bool testing = false;     // the adapter is on trial beside the built-in radio
     bool failed = false;      // the adapter did not hold a connection; left alone until asked again
+    bool lent = false;        // left idle for an app that wants the adapter for itself
     bool settled() const;     // nothing for the helper to do
 };
 DongleState dongle_state();
 void set_dongle_follow(bool on);
 void dongle_sync();
+
+// Apps that take a Wi-Fi adapter for themselves (monitor mode) and refuse one
+// that is carrying a connection. Before one starts the adapter is left idle and
+// Wi-Fi goes back to the built-in radio; when the launcher is home again the
+// adapter is taken back. The list is the config key "ground0_dongle_apps"
+// (comma separated app names or program file names).
+bool dongle_app(const std::string &name, const std::string &exec);
+void dongle_lend();           // waits until the adapter is idle (a few seconds)
+void dongle_return();
+void set_dongle_owed(bool owed);
+bool dongle_owed();
 
 } // namespace ground0

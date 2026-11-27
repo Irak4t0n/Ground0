@@ -37,6 +37,7 @@ void UILaunchPage::show_home_screen()
     lv_disp_load_scr(screen());
     bind_home_input_group();
     settle_radio_debt();
+    settle_dongle_debt();
 }
 
 void UILaunchPage::load_home_screen()

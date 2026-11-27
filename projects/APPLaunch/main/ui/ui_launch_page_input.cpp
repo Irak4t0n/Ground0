@@ -102,6 +102,17 @@ void UILaunchPage::handle_home_key(lv_event_t *event)
                 }
             }
 
+            // Apps that take the USB Wi-Fi adapter for themselves refuse one that
+            // is carrying a connection: leave it idle first (Wi-Fi goes back to
+            // the built-in radio) and take it back when the launcher is home.
+            if (entry && ground0::dongle_app(entry->Name, entry->Exec) && ground0::dongle_state().available) {
+                ground0::set_dongle_owed(true);
+                ui_loading::show("Freeing Wi-Fi dongle...");
+                lv_refr_now(nullptr);
+                ground0::dongle_lend();
+                ui_loading::hide();
+            }
+
             launch_selected_app();
             // Whenever the launcher is back on its home screen (the app exited,
             // failed to start, or its page was closed) show_home_screen() has
@@ -196,6 +207,13 @@ void UILaunchPage::on_home_key(lv_event_t *event) noexcept
 // that the launcher is home again, start it. Called from show_home_screen(),
 // which every way back home goes through: an external app exiting (however
 // quickly), a launch that failed, a terminal or built-in page being closed.
+void UILaunchPage::settle_dongle_debt()
+{
+    if (!ground0::dongle_owed()) return;
+    ground0::set_dongle_owed(false);
+    ground0::dongle_return();
+}
+
 void UILaunchPage::settle_radio_debt()
 {
     ground0::Radio &radio = ground0::Radio::instance();
