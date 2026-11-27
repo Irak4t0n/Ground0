@@ -6,11 +6,15 @@
 
 #include "ground0_system.hpp"
 
-#include "ui.h"
 #include "cp0_lvgl_app.h"
+#include "ground0_settings.hpp"
+#include "launcher_platform.hpp"
+#include "ui.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +25,7 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <unordered_map>
 #include <vector>
 
 namespace ground0 {
@@ -92,14 +97,129 @@ bool hdmi_connected()
     return connected;
 }
 
-std::string capture(const char *const *argv)
+const char *const kLeanArgv[] = {"systemctl", "is-enabled", "lightdm.service", nullptr};
+// Two lines: the radio switch, then the network name (empty when not connected).
+const char *const kWifiArgv[] = {"sh", "-c", "nmcli -t -f WIFI general; iwgetid -r", nullptr};
+
+Switch lean_from(const std::string &answer)
 {
-    char out[256] = "";
-    cp0_process_capture_argv(argv, out, sizeof(out));
-    return trimmed(out);
+    if (answer == "enabled") return Switch::Off;
+    if (answer == "disabled") return Switch::On;
+    return Switch::Unknown;
+}
+
+WifiState wifi_from(const std::string &answer)
+{
+    WifiState state;
+    const std::size_t end = answer.find('\n');
+    const std::string radio = trimmed(answer.substr(0, end));
+    if (radio == "enabled") state.radio = Switch::On;
+    if (radio == "disabled") state.radio = Switch::Off;
+    if (state.radio == Switch::On && end != std::string::npos) state.ssid = trimmed(answer.substr(end + 1));
+    return state;
 }
 
 } // namespace
+
+Probe::~Probe()
+{
+    if (fd_ >= 0) close(fd_);
+    if (pid_ > 0) {
+        kill(-pid_, SIGKILL);
+        waitpid(pid_, nullptr, 0);
+    }
+}
+
+bool Probe::start(const char *const *argv, int timeout_ms)
+{
+    if (!argv || !argv[0] || pid_ > 0) return false;
+    // The answers are read as text, so the commands must print them in English
+    // whatever language the system is set to. Built here: between fork and exec
+    // nothing may allocate memory.
+    std::vector<std::string> variables;
+    for (char **entry = environ; entry && *entry; ++entry)
+        if (std::strncmp(*entry, "LC_ALL=", 7) != 0 && std::strncmp(*entry, "LANGUAGE=", 9) != 0)
+            variables.emplace_back(*entry);
+    variables.emplace_back("LC_ALL=C");
+    std::vector<char *> environment;
+    for (std::string &variable : variables) environment.push_back(&variable[0]);
+    environment.push_back(nullptr);
+
+    int ends[2];
+    if (pipe2(ends, O_CLOEXEC) != 0) return false;
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(ends[0]);
+        close(ends[1]);
+        return false;
+    }
+    if (pid == 0) {
+        setpgid(0, 0);      // its own group, so stopping it also stops what it started
+        const int null = open("/dev/null", O_RDWR);
+        if (null >= 0) {
+            dup2(null, STDIN_FILENO);
+            dup2(null, STDERR_FILENO);
+        }
+        dup2(ends[1], STDOUT_FILENO);
+        execvpe(argv[0], const_cast<char *const *>(argv), environment.data());
+        _exit(127);
+    }
+    setpgid(pid, pid);  // also from this side: whichever runs first wins
+    close(ends[1]);
+    fcntl(ends[0], F_SETFL, fcntl(ends[0], F_GETFL) | O_NONBLOCK);   // our end only
+    fd_ = ends[0];
+    pid_ = pid;
+    text_.clear();
+    deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    return true;
+}
+
+bool Probe::done(std::string &out)
+{
+    if (pid_ <= 0) return false;
+    bool closed = false;
+    char chunk[256];
+    for (;;) {
+        const ssize_t count = read(fd_, chunk, sizeof(chunk));
+        if (count > 0) {
+            if (text_.size() < 4096) text_.append(chunk, static_cast<std::size_t>(count));
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        closed = count == 0 || (errno != EAGAIN && errno != EWOULDBLOCK);
+        break;
+    }
+    const bool late = std::chrono::steady_clock::now() >= deadline_;
+    if (!closed && !late) return false;
+    bool gone = closed && waitpid(pid_, nullptr, WNOHANG) != 0;
+    if (!gone && !late) return false;              // it closed its output and is about to exit
+    if (!gone) {
+        // Over its time limit: stop it, and let the background list collect it.
+        kill(-pid_, SIGKILL);
+        children().push_back(pid_);
+        text_.clear();
+    }
+    close(fd_);
+    fd_ = -1;
+    pid_ = -1;
+    out = trimmed(text_);
+    return true;
+}
+
+std::string Probe::wait()
+{
+    std::string out;
+    if (pid_ <= 0) return out;
+    while (!done(out)) usleep(3000);
+    return out;
+}
+
+std::string capture_now(const char *const *argv, int timeout_ms)
+{
+    Probe probe;
+    if (!probe.start(argv, timeout_ms)) return {};
+    return probe.wait();
+}
 
 void run_background(const char *const *argv)
 {
@@ -141,9 +261,13 @@ DeskState desk_state()
     state.installed = stat(desk_dir().c_str(), &info) == 0 && S_ISDIR(info.st_mode);
     if (!state.installed) return state;
     state.hdmi = hdmi_connected();
-    const std::string status = slurp(desk_dir() + "/status");   // {"hdmi": .., "desktop": true, "keyboard": "desktop"}
-    state.desktop = status.find("\"desktop\": true") != std::string::npos;
-    state.keyboard_away = status.find("\"keyboard\": \"desktop\"") != std::string::npos;
+    // {"hdmi": .., "desktop": true, "keyboard": "desktop"}; compared without
+    // blanks, so a daemon update that writes its JSON differently still reads.
+    std::string status = slurp(desk_dir() + "/status");
+    status.erase(std::remove_if(status.begin(), status.end(), [](unsigned char c) { return std::isspace(c); }),
+                 status.end());
+    state.desktop = status.find("\"desktop\":true") != std::string::npos;
+    state.keyboard_away = status.find("\"keyboard\":\"desktop\"") != std::string::npos;
     state.autostart = setting("AUTOSTART", "1") != "0";
     return state;
 }
@@ -165,11 +289,7 @@ bool desk_set_autostart(bool on)
 Switch lean_boot()
 {
     if (const char *sim = std::getenv("GROUND0_LEAN_SIM")) return std::strcmp(sim, "1") == 0 ? Switch::On : Switch::Off;
-    const char *argv[] = {"systemctl", "is-enabled", "lightdm.service", nullptr};
-    const std::string answer = capture(argv);
-    if (answer == "enabled") return Switch::Off;
-    if (answer == "disabled") return Switch::On;
-    return Switch::Unknown;
+    return lean_from(capture_now(kLeanArgv));
 }
 
 void set_lean_boot(bool on)
@@ -181,16 +301,43 @@ void set_lean_boot(bool on)
 
 WifiState wifi_state()
 {
-    WifiState state;
-    const char *radio[] = {"nmcli", "-t", "-f", "WIFI", "general", nullptr};
-    const std::string answer = capture(radio);
-    if (answer == "enabled") state.radio = Switch::On;
-    if (answer == "disabled") state.radio = Switch::Off;
-    if (state.radio == Switch::On) {
-        const char *ssid[] = {"iwgetid", "-r", nullptr};
-        state.ssid = capture(ssid);
+    return wifi_from(capture_now(kWifiArgv));
+}
+
+void QuickReads::start()
+{
+    if (running()) return;
+    // The simulated lean-boot value needs no command; poll() hands it over.
+    lean_wanted_ = std::getenv("GROUND0_LEAN_SIM") != nullptr || lean_.start(kLeanArgv);
+    wifi_wanted_ = wifi_.start(kWifiArgv);
+}
+
+bool QuickReads::poll(Switch &lean, WifiState &wifi)
+{
+    bool changed = false;
+    std::string answer;
+    if (lean_wanted_ && !lean_.running()) {
+        lean = lean_boot();
+        lean_wanted_ = false;
+        changed = true;
+    } else if (lean_wanted_ && lean_.done(answer)) {
+        lean = lean_from(answer);
+        lean_wanted_ = false;
+        changed = true;
     }
-    return state;
+    if (wifi_wanted_ && wifi_.done(answer)) {
+        wifi = wifi_from(answer);
+        wifi_wanted_ = false;
+        changed = true;
+    }
+    return changed;
+}
+
+void QuickReads::finish(Switch &lean, WifiState &wifi)
+{
+    while (running()) {
+        if (!poll(lean, wifi)) usleep(3000);
+    }
 }
 
 std::string wifi_helper()
@@ -275,46 +422,54 @@ void dongle_sync()
     run_wifi_helper("sync");
 }
 
-namespace {
-
-std::string dongle_config(const char *key, std::string value)
+AppEntry app_entry(const std::string &exec)
 {
-    cp0_signal_config_api({"GetStr", key, value},
-                          [&](int code, std::string data) { if (code == 0) value = std::move(data); });
-    return value;
+    const char *override_dir = std::getenv("GROUND0_APPS_DIR");
+    const std::string folder = override_dir ? override_dir : launcher_platform::path("applications");
+    // Looking an app up reads every .desktop file (about 130 on a full device),
+    // so answers are kept until the folder changes: installing, removing or
+    // updating an app replaces a file there, which changes the folder's date.
+    static std::string known_folder;
+    static long long known_stamp = -1;
+    static std::unordered_map<std::string, AppEntry> known;
+    struct stat info;
+    const long long stamp = stat(folder.c_str(), &info) == 0
+                                ? static_cast<long long>(info.st_mtim.tv_sec) * 1000000000LL + info.st_mtim.tv_nsec
+                                : 0;
+    if (folder != known_folder || stamp != known_stamp) {
+        known.clear();
+        known_folder = folder;
+        known_stamp = stamp;
+    }
+    const auto found = known.find(exec);
+    if (found != known.end()) return found->second;
+    const AppEntry entry = app_entry_in(folder, exec);
+    known.emplace(exec, entry);
+    return entry;
 }
 
-std::string lowered(std::string value)
+bool settings::legacy_lookup(const std::string &key, std::string &value)
 {
-    for (char &c : value) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return value;
+    // The shared config hands back the fallback it is given when a key is not
+    // set; this one cannot be a stored value.
+    const std::string unset = "\x01unset";
+    std::string found = unset;
+    cp0_signal_config_api({"GetStr", key, unset},
+                          [&](int code, std::string data) { if (code == 0) found = std::move(data); });
+    if (found == unset) return false;
+    value = found;
+    return true;
 }
-
-} // namespace
 
 bool dongle_app(const std::string &name, const std::string &exec)
 {
-    // Same matching as the LoRa radio lists: the app name, or the file name of
-    // any path in its Exec line (and its first word), compared whole.
-    std::vector<std::string> keys = {lowered(name)};
-    std::stringstream tokens(exec);
-    std::string token;
-    while (tokens >> token) {
-        const std::size_t slash = token.find_last_of('/');
-        if (slash == std::string::npos && keys.size() > 1) continue;
-        keys.push_back(lowered(slash == std::string::npos ? token : token.substr(slash + 1)));
-    }
-    std::stringstream list(lowered(dongle_config(
-        "ground0_dongle_apps",
-        "marauder,marauder_cardputerzero,zerogotchi,lokicz,lokictl,quartermaster,raspyjack,run-raspyjack.sh")));
-    std::string word;
-    while (std::getline(list, word, ',')) {
-        const std::size_t first = word.find_first_not_of(" \t");
-        if (first == std::string::npos) continue;
-        word = word.substr(first, word.find_last_not_of(" \t") - first + 1);
-        if (std::find(keys.begin(), keys.end(), word) != keys.end()) return true;
-    }
-    return false;
+    const AppEntry entry = app_entry(exec);
+    if (entry.wifi == "idle") return true;
+    if (entry.wifi == "none") return false;
+    return listed(app_keys(name, exec, entry.id),
+                  settings::get("dongle_apps",
+                                "marauder,marauder_cardputerzero,zerogotchi,lokicz,lokictl,quartermaster,"
+                                "raspyjack,run-raspyjack.sh"));
 }
 
 void dongle_lend()
@@ -322,7 +477,9 @@ void dongle_lend()
     const std::string helper = wifi_helper();
     if (access(helper.c_str(), X_OK) != 0) return;
     const char *argv[] = {"sudo", "-n", helper.c_str(), "lend", nullptr};
-    cp0_process_run_argv(argv, 0);
+    // Returns as soon as the adapter is idle (about half a second); the built-in
+    // radio reconnects in the background. Never waited for longer than this.
+    capture_now(argv, 25000);
 }
 
 void dongle_return()
@@ -330,15 +487,16 @@ void dongle_return()
     run_wifi_helper("return");
 }
 
+// Kept on disk so it survives the launcher being restarted while the app is open.
 void set_dongle_owed(bool owed)
 {
-    cp0_signal_config_api({"SetStr", "ground0_dongle_owed", owed ? "1" : "0"}, [](int, std::string) {});
-    cp0_signal_config_api({"Save"}, [](int, std::string) {});
+    settings::put("dongle_owed", owed ? "1" : "0");
+    settings::save();
 }
 
 bool dongle_owed()
 {
-    return dongle_config("ground0_dongle_owed", "0") == "1";
+    return settings::get("dongle_owed", "0") == "1";
 }
 
 } // namespace ground0

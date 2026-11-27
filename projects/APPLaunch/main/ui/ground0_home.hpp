@@ -60,8 +60,9 @@ public:
     std::size_t selected() const;
     bool searching() const { return searching_; }
     Action handle_key(const struct key_item &item);
-    // Re-read who holds the LoRa radio and repaint the status-bar chip.
-    void refresh_radio();
+    // The launcher is back on its home screen (an app closed): bring the clock,
+    // battery and radio chip up to date now, not at the next 15-second tick.
+    void resume();
     // A start or stop was requested elsewhere: show it as pending until it lands.
     void expect_radio(bool mesh_on);
 
@@ -81,7 +82,8 @@ private:
     };
 
     void load_settings();
-    void save_settings();
+    void save_settings();     // soon, off the key press
+    void flush_settings();    // now
     void rebuild();
     void build_bar();
     void build_strip();
@@ -98,7 +100,7 @@ private:
     void move(int delta);
     void refilter(std::size_t keep_item);
     void switch_tab(int step);
-    void rebuild_tabs(const std::string &keep_label);
+    void rebuild_tabs(std::string keep_label);
     TabKind tab_kind() const;
     const std::string &tab_label() const;
     void load_index();
@@ -118,6 +120,9 @@ private:
     static void on_radio_timer(lv_timer_t *timer) noexcept;
     static void on_update_timer(lv_timer_t *timer) noexcept;
     static void on_quick_timer(lv_timer_t *timer) noexcept;
+    static void on_save_timer(lv_timer_t *timer) noexcept;
+    static void on_probe_timer(lv_timer_t *timer) noexcept;
+    void watch_probes();
 
     // Quick panel: radio, HDMI desk, lean boot, Wi-Fi.
     void run_command(int command);
@@ -146,8 +151,13 @@ private:
     lv_obj_t *quick_name_[kQuickRows] = {};
     lv_obj_t *quick_value_[kQuickRows] = {};
     lv_timer_t *quick_timer_ = nullptr;
+    lv_timer_t *probe_timer_ = nullptr;     // runs only while a background read is outstanding
+    lv_timer_t *save_timer_ = nullptr;      // runs only while settings wait to be written
+    bool settings_dirty_ = false;
+    ground0::QuickReads quick_reads_;
     bool quick_open_ = false;
     int quick_selected_ = 0;
+    int quick_painted_ = -1;        // row whose highlight is drawn, -1 before the first paint
     int quick_slow_in_ = 0;         // ticks until lean boot and Wi-Fi are read again
     ground0::DeskState desk_;
     ground0::Switch lean_ = ground0::Switch::Unknown;
@@ -187,8 +197,13 @@ private:
     std::vector<TabDef> tabs_;
     std::size_t tab_index_ = 0;
     std::string saved_tab_ = "All apps";
+    bool tab_restored_ = false;     // the saved list has been looked for among the real apps
     std::unordered_map<std::string, IndexEntry> index_;   // by Exec line
     long index_stamp_ = 0;          // modification time of the index file last loaded
+    bool index_wanted_ = false;     // ask the helper for a new index at the next quiet moment
+    std::chrono::steady_clock::time_point index_asked_{};
+    long store_stamp_ = 0;          // date of the Store's installed-apps record when the index was last asked for
+    std::size_t apps_signature_ = 0;   // which apps were listed at the last set_items()
     lv_timer_t *update_timer_ = nullptr;
     bool updating_ = false;
     int update_ticks_ = 0;

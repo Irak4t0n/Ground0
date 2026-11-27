@@ -78,7 +78,7 @@ The package adds a sudo rule file (`/etc/sudoers.d/ground0`) so the switches wor
 | Feature | Needs |
 |---|---|
 | Updates | 0Hero from the store |
-| Radio switch | MeshZero (`meshzero.service`), or any unit named in `ground0_radio_unit` |
+| Radio switch | MeshZero (`meshzero.service`), or any unit named in the `radio_unit` setting |
 | HDMI desktop, keyboard handover | [Desk Mode](https://github.com/InstantComet/cz-desk-mode) from the store |
 | Wi-Fi switch, Wi-Fi on a USB dongle | NetworkManager (`nmcli`) |
 
@@ -86,7 +86,7 @@ A row whose piece is missing says so instead of doing nothing.
 
 **Wi-Fi on a USB dongle** is on by default and has its own row in the quick panel. It is handled by a small system service that reacts when an adapter is plugged in or pulled out, so it keeps working even if the launcher is not running. The built-in radio is not given up until the adapter has joined the network, held the connection and kept answering from the gateway for 30 seconds (about a minute in all). An adapter that fails that test, or drops out later, is left alone (the row shows it as unstable) and the built-in radio carries on; press Enter on the row to test it again.
 
-**Apps that want the adapter for themselves.** Some tools (Marauder, for one) only take a Wi-Fi adapter that is idle and refuse one that is carrying a connection. Before Ground0 starts one of those it moves Wi-Fi back to the built-in radio and leaves the adapter disconnected; when you are back on the home screen it moves Wi-Fi to the adapter again, without repeating the test if the adapter was never unplugged. The apps are listed in the launcher's config key `ground0_dongle_apps` (comma separated app names or program file names; default `marauder,marauder_cardputerzero,zerogotchi,lokicz,lokictl,quartermaster,raspyjack,run-raspyjack.sh`).
+**Apps that want the adapter for themselves.** Some tools (Marauder, for one) only take a Wi-Fi adapter that is idle and refuse one that is carrying a connection. Before Ground0 starts one of those it moves Wi-Fi back to the built-in radio and leaves the adapter disconnected; when you are back on the home screen it moves Wi-Fi to the adapter again, without repeating the test if the adapter was never unplugged. An app is one of these when its `.desktop` file says `X-Ground0-WifiAdapter=idle`, or when it is in the `dongle_apps` setting (default `marauder,marauder_cardputerzero,zerogotchi,lokicz,lokictl,quartermaster,raspyjack,run-raspyjack.sh`).
 
 The package also sets one driver option for MediaTek USB adapters (`mt76_usb disable_usb_sg=1`, in `/usr/lib/modprobe.d/ground0-mt76-usb.conf`). Without it those adapters reset themselves on the Cardputer Zero's USB port after a few seconds of traffic; it takes effect the next time the adapter is plugged in or the device boots.
 
@@ -94,16 +94,38 @@ The package also sets one driver option for MediaTek USB adapters (`mt76_usb dis
 
 ## Settings
 
-Ground0 keeps its settings in the launcher's own config (`~/.config/cardputerzero/config.json`):
+Ground0 keeps its settings in its own file, `~/.config/ground0/settings`: one `key=value` per line, and a key that repeats is a list. It never writes the stock launcher's `config.json`. (Versions before 0.2.10 kept these as `ground0_*` keys in that file; they are still read from there until a key is first saved in the new place.) Edit the file by hand if you like; keys Ground0 does not know are left alone.
 
 | Key | Meaning |
 |---|---|
-| `ground0_theme`, `ground0_view`, `ground0_tab` | Theme, list or grid, last list |
-| `ground0_favs`, `ground0_recent` | App names, `\|`-separated |
-| `ground0_radio_unit` | Mesh daemon unit (default `meshzero.service`) |
-| `ground0_radio_free` | Apps that need the radio free, comma-separated. Matched against the app name or the file name in its `Exec` line |
-| `ground0_radio_mesh` | Apps that need the mesh daemon running |
-| `ground0_radio_restore` | `1`: start the daemon again when a free-radio app closes |
+| `theme`, `view`, `tab` | Theme, `list` or `grid`, the list that was open last |
+| `fav`, `recent` | One app name per line |
+| `radio_unit` | Mesh daemon unit (default `meshzero.service`) |
+| `radio_free` | Apps that need the radio free, comma-separated |
+| `radio_mesh` | Apps that need the mesh daemon running |
+| `radio_restore` | `1`: start the daemon again when a free-radio app closes |
+| `dongle_apps` | Apps that take a USB Wi-Fi adapter for themselves |
+
+In the three app lists an app is matched, whole and without regard to case, by its name, by the name of its `.desktop` file, or by the file name of the program in its `Exec` line. Setting one of them replaces Ground0's built-in list.
+
+### For app authors
+
+An app can say what it needs in its own `.desktop` file, and Ground0 then does the right thing without having to know the app by name:
+
+| Key | Values | Effect |
+|---|---|---|
+| `X-Ground0-Radio` | `free`, `mesh`, `none` | `free`: the mesh daemon is stopped before the app starts and started again afterwards. `mesh`: it is started first. |
+| `X-Ground0-WifiAdapter` | `idle`, `none` | `idle`: a USB Wi-Fi adapter is left disconnected for the app (monitor mode and the like) and Wi-Fi moves to the built-in radio while it runs. |
+
+`none` switches off what Ground0's lists would otherwise do for that app. Other launchers ignore these keys.
+
+### Living beside the stock launcher
+
+- The stock launcher package (`applaunch`) stays installed and keeps updating. Its program is kept as `M5CardputerZero-APPLaunch.stock`; an update to it lands there and does not replace Ground0.
+- If Ground0 cannot start five times within a minute (for example after a system update removed something it needs), the stock launcher starts in its place until the next boot or `ground0 on`.
+- App icons Ground0 cannot read are shown as the launcher's generic icon.
+- Categories and update marks follow the Store: they refresh when an app is installed, removed or updated, and when you come back from an app.
+- Commands Ground0 reads from (`systemctl`, `nmcli`) are run in English, so a system set to another language behaves the same.
 
 ## Build
 
@@ -118,7 +140,9 @@ scons -j8
 export CardputerZero=y CONFIG_REPO_AUTOMATION=y
 scons -j8
 # package
-../../ground0/packaging/build-deb.sh dist/M5CardputerZero-APPLaunch 0.2.7
+../../ground0/packaging/build-deb.sh dist/M5CardputerZero-APPLaunch 0.2.10
+# Ground0's own tests (a C++17 compiler; no root, no Cardputer, no Wi-Fi adapter)
+sh ../../ground0/tests/run.sh
 ```
 
 Simulator switches for testing without the hardware: `GROUND0_RADIO_SIM=mesh|free`, `GROUND0_DESK_DIR=<folder>`, `GROUND0_HDMI_SIM=1`, `GROUND0_LEAN_SIM=0|1`, `GROUND0_APPS_DIR=<folder>`.

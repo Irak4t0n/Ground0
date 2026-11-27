@@ -14,9 +14,43 @@
 // boot; the HDMI desktop still starts on demand through the daemon.
 #pragma once
 
+#include "ground0_apps.hpp"
+
+#include <chrono>
 #include <string>
+#include <sys/types.h>
+#include <vector>
 
 namespace ground0 {
+
+// A command whose output is collected without making the caller wait: start()
+// it, then ask done() from a timer. The status reads go through this, so a slow
+// or stuck system command can never freeze the screen. A command that runs past
+// its time limit is stopped and counts as having printed nothing.
+class Probe
+{
+public:
+    Probe() = default;
+    ~Probe();
+    Probe(const Probe &) = delete;
+    Probe &operator=(const Probe &) = delete;
+
+    bool start(const char *const *argv, int timeout_ms = 4000);
+    bool running() const { return pid_ > 0; }
+    // True once per run, when the command has ended; `out` is what it printed.
+    bool done(std::string &out);
+    // The same, waited for (never longer than the time limit).
+    std::string wait();
+
+private:
+    pid_t pid_ = -1;
+    int fd_ = -1;
+    std::string text_;
+    std::chrono::steady_clock::time_point deadline_;
+};
+
+// Run a command and wait for what it prints, for at most `timeout_ms`.
+std::string capture_now(const char *const *argv, int timeout_ms = 3000);
 
 // Start a command and return at once, with its output discarded. The launcher's
 // own background runner never collects its children, which leaves a defunct
@@ -51,6 +85,22 @@ struct WifiState
 WifiState wifi_state();
 void set_wifi(bool on);
 
+// Lean boot and Wi-Fi each take a command to read (about 50 and 100 ms on a
+// Cardputer Zero). The quick panel reads both in the background through this.
+class QuickReads
+{
+public:
+    void start();                                   // no effect while a read is running
+    bool running() const { return lean_wanted_ || wifi_wanted_; }
+    bool poll(Switch &lean, WifiState &wifi);       // true when a value was stored
+    void finish(Switch &lean, WifiState &wifi);     // wait for the answers
+private:
+    Probe lean_;
+    Probe wifi_;
+    bool lean_wanted_ = false;
+    bool wifi_wanted_ = false;
+};
+
 // Wi-Fi follows a USB adapter: while one is plugged in and in normal mode the
 // network moves to it and the built-in radio disconnects (see
 // ground0/packaging/files/ground0-wifi). Read from sysfs and two small files,
@@ -71,13 +121,16 @@ DongleState dongle_state();
 void set_dongle_follow(bool on);
 void dongle_sync();
 
+// The app with this Exec line, looked up in the launcher's applications folder.
+AppEntry app_entry(const std::string &exec);
+
 // Apps that take a Wi-Fi adapter for themselves (monitor mode) and refuse one
 // that is carrying a connection. Before one starts the adapter is left idle and
 // Wi-Fi goes back to the built-in radio; when the launcher is home again the
-// adapter is taken back. The list is the config key "ground0_dongle_apps"
-// (comma separated app names or program file names).
+// adapter is taken back. An app is one of these when its .desktop file says
+// X-Ground0-WifiAdapter=idle, or when it is in the "dongle_apps" setting.
 bool dongle_app(const std::string &name, const std::string &exec);
-void dongle_lend();           // waits until the adapter is idle (a few seconds)
+void dongle_lend();           // waits until the adapter is idle (about half a second)
 void dongle_return();
 void set_dongle_owed(bool owed);
 bool dongle_owed();

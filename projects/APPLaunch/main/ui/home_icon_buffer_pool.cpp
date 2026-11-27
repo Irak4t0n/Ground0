@@ -179,11 +179,12 @@ const lv_image_dsc_t *HomeIconBufferPool::find_on_demand(const std::string &path
     const std::string key = path + "\n" + std::to_string(size);
     const auto cached = resized_icons_.find(key);
     if (cached != resized_icons_.end())
-        return as_image(cached->second);
+        return cached->second ? as_image(cached->second) : &home_icon_fallback;
+    // An icon that cannot be read (missing file, a format the decoder does not
+    // know) is remembered as such and shown as the generic icon; without that
+    // it was read from the card again on every redraw.
     DrawBufferPtr icon = decode_and_prepare(path, size);
-    if (!icon)
-        return nullptr;
-    const lv_image_dsc_t *result = as_image(icon);
+    const lv_image_dsc_t *result = icon ? as_image(icon) : &home_icon_fallback;
     resized_icons_.emplace(key, std::move(icon));
     return result;
 }

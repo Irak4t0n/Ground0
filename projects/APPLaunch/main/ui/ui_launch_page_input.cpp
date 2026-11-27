@@ -105,19 +105,27 @@ void UILaunchPage::handle_home_key(lv_event_t *event)
             // Apps that take the USB Wi-Fi adapter for themselves refuse one that
             // is carrying a connection: leave it idle first (Wi-Fi goes back to
             // the built-in radio) and take it back when the launcher is home.
-            if (entry && ground0::dongle_app(entry->Name, entry->Exec) && ground0::dongle_state().available) {
-                ground0::set_dongle_owed(true);
-                ui_loading::show("Freeing Wi-Fi dongle...");
-                lv_refr_now(nullptr);
-                ground0::dongle_lend();
-                ui_loading::hide();
+            if (entry && ground0::dongle_app(entry->Name, entry->Exec)) {
+                const ground0::DongleState dongle = ground0::dongle_state();
+                if (dongle.available) {
+                    ground0::set_dongle_owed(true);
+                    // With no adapter plugged in this only leaves a note for one
+                    // that is plugged in later, and takes a moment: no message.
+                    const bool show = !dongle.adapter.empty();
+                    if (show) {
+                        ui_loading::show("Freeing Wi-Fi dongle...");
+                        lv_refr_now(nullptr);
+                    }
+                    ground0::dongle_lend();
+                    if (show) ui_loading::hide();
+                }
             }
 
             launch_selected_app();
             // Whenever the launcher is back on its home screen (the app exited,
             // failed to start, or its page was closed) show_home_screen() has
             // already given the radio back; see settle_radio_debt().
-            if (ground0_ && ground0_->valid()) ground0_->refresh_radio();
+            if (ground0_ && ground0_->valid()) ground0_->resume();
         }
         return;
     }

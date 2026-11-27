@@ -8,7 +8,9 @@
 
 #include "cp0_lvgl_app.h"
 #include "ground0_radio.hpp"
+#include "ground0_settings.hpp"
 #include "ground0_theme.hpp"
+#include "home_icon_fallback.h"
 #include "input_keys.h"
 #include "launcher_toast.h"
 #include "ui.h"
@@ -17,6 +19,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <fstream>
 #include <string>
@@ -102,6 +105,38 @@ lv_obj_t *box(lv_obj_t *parent, int x, int y, int w, int h, uint32_t color, bool
     return obj;
 }
 
+// Shortens a text with "..." until it fits `width` pixels in `font`. LVGL's own
+// dot mode does not always give the same result for the same text (a name can
+// show as "Pocket..." and, after the next key press, as "Pocket"), and it
+// rewrites the label's text while doing it, so Ground0 fits texts itself.
+std::string fitted(const char *value, const lv_font_t *font, int width)
+{
+    std::string out = value ? value : "";
+    const auto measure = [font](const std::string &part) {
+        lv_point_t size = {0, 0};
+        lv_text_get_size(&size, part.c_str(), font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+        return static_cast<int>(size.x);
+    };
+    if (width <= 0 || !font || measure(out) <= width) return out;
+    const int room = width - measure("...");
+    while (!out.empty()) {
+        // One whole UTF-8 character at a time, and no blank left before the dots.
+        while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xC0) == 0x80) out.pop_back();
+        if (!out.empty()) out.pop_back();
+        while (!out.empty() && out.back() == ' ') out.pop_back();
+        if (measure(out) <= room) break;
+    }
+    return out + "...";
+}
+
+// The text a fixed-width label should show for `value`.
+std::string fitted_for(lv_obj_t *label, const char *value)
+{
+    const int32_t width = lv_obj_get_style_width(label, LV_PART_MAIN);
+    if (width <= 0 || width == LV_SIZE_CONTENT || LV_COORD_IS_PCT(width)) return value ? value : "";
+    return fitted(value, lv_obj_get_style_text_font(label, LV_PART_MAIN), width);
+}
+
 lv_obj_t *text(lv_obj_t *parent, int x, int y, int w, const lv_font_t *font, uint32_t color,
                const char *value, lv_text_align_t align = LV_TEXT_ALIGN_LEFT)
 {
@@ -111,15 +146,60 @@ lv_obj_t *text(lv_obj_t *parent, int x, int y, int w, const lv_font_t *font, uin
     lv_obj_set_pos(label, x, y);
     if (w > 0) {
         lv_obj_set_width(label, w);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_CLIP);
         lv_obj_set_height(label, lv_font_get_line_height(font));
     }
     lv_obj_set_style_text_font(label, font, LV_PART_MAIN);
     lv_obj_set_style_text_color(label, hex(color), LV_PART_MAIN);
     lv_obj_set_style_text_align(label, align, LV_PART_MAIN);
-    lv_label_set_text(label, value ? value : "");
+    lv_label_set_text(label, fitted_for(label, value).c_str());
     return label;
 }
+
+// LVGL re-measures and redraws a label, an image or an object on every setter
+// call, even when the value is already there. These leave it alone in that
+// case, so a cursor move redraws the rows that changed and not the whole screen.
+void set_label(lv_obj_t *label, const char *value)
+{
+    if (!label) return;
+    const std::string shown = fitted_for(label, value);
+    const char *now = lv_label_get_text(label);
+    if (now && shown == now) return;
+    lv_label_set_text(label, shown.c_str());
+}
+
+void set_text_color(lv_obj_t *obj, uint32_t color)
+{
+    if (!obj) return;
+    lv_style_value_t now;
+    if (lv_obj_get_local_style_prop(obj, LV_STYLE_TEXT_COLOR, &now, LV_PART_MAIN) == LV_STYLE_RES_FOUND &&
+        lv_color_eq(now.color, hex(color)))
+        return;
+    lv_obj_set_style_text_color(obj, hex(color), LV_PART_MAIN);
+}
+
+// Shows or hides a box's fill and outline together (the selection highlight).
+void set_highlight(lv_obj_t *obj, bool on)
+{
+    if (!obj) return;
+    const lv_opa_t opa = on ? LV_OPA_COVER : LV_OPA_TRANSP;
+    lv_style_value_t now;
+    if (lv_obj_get_local_style_prop(obj, LV_STYLE_BORDER_OPA, &now, LV_PART_MAIN) == LV_STYLE_RES_FOUND &&
+        now.num == opa)
+        return;
+    lv_obj_set_style_bg_opa(obj, opa, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(obj, opa, LV_PART_MAIN);
+}
+
+void set_shown(lv_obj_t *obj, bool shown)
+{
+    if (!obj) return;
+    if (shown)
+        lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    else
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+}
+
 
 // Vertical position that centres one line of `font` in a strip `height` tall.
 int centred(int height, const lv_font_t *font)
@@ -254,44 +334,6 @@ void draw_art(lv_obj_t *body, int width, int height)
     }
 }
 
-std::string config_get_str(const char *key, std::string value)
-{
-    cp0_signal_config_api({"GetStr", key, value},
-                          [&](int code, std::string data) { if (code == 0) value = std::move(data); });
-    return value;
-}
-
-void config_set_str(const char *key, const std::string &value)
-{
-    cp0_signal_config_api({"SetStr", key, value}, [](int, std::string) {});
-    cp0_signal_config_api({"Save"}, [](int, std::string) {});
-}
-
-// Lists are stored as one config string, entries separated by '|'.
-std::vector<std::string> split_list(const std::string &text)
-{
-    std::vector<std::string> out;
-    std::size_t start = 0;
-    while (start <= text.size()) {
-        const std::size_t end = text.find('|', start);
-        const std::string entry = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        if (!entry.empty()) out.push_back(entry);
-        if (end == std::string::npos) break;
-        start = end + 1;
-    }
-    return out;
-}
-
-std::string join_list(const std::vector<std::string> &list)
-{
-    std::string out;
-    for (const std::string &entry : list) {
-        if (!out.empty()) out += '|';
-        out += entry;
-    }
-    return out;
-}
-
 std::string cache_path(const char *file)
 {
     const char *home = std::getenv("HOME");
@@ -302,6 +344,13 @@ std::string helper_path()
 {
     if (const char *path = std::getenv("GROUND0_HELPER")) return path;
     return "/usr/share/APPLaunch/share/ground0/ground0-helper.py";
+}
+
+// The Store's list of what it has installed (also read by ground0-helper.py).
+std::string store_record_path()
+{
+    const char *home = std::getenv("HOME");
+    return std::string(home ? home : "/tmp") + "/.local/share/cardputerzero-appstore/installed.json";
 }
 
 long file_stamp(const std::string &path)
@@ -350,7 +399,6 @@ Ground0Home::Ground0Home(lv_obj_t *parent, IconLookup lookup)
 {
     if (!parent_) return;
     load_settings();
-    ground0::Radio::instance().poll();
     root_ = box(parent_, 0, 0, kScreenW, kScreenH, ground0::theme().desk);
     if (!root_) return;
     lv_obj_add_event_cb(root_, on_root_deleted, LV_EVENT_DELETE, this);
@@ -372,6 +420,19 @@ Ground0Home::Ground0Home(lv_obj_t *parent, IconLookup lookup)
 
 Ground0Home::~Ground0Home()
 {
+    // When the display library has already been shut down (the simulator does
+    // that before it exits) its timers and objects are gone with it.
+    const bool display_alive = lv_is_initialized();
+    if (!display_alive) save_timer_ = nullptr;
+    try {
+        flush_settings();
+    } catch (...) {
+    }
+    if (!display_alive) return;
+    if (save_timer_) lv_timer_delete(save_timer_);
+    save_timer_ = nullptr;
+    if (probe_timer_) lv_timer_delete(probe_timer_);
+    probe_timer_ = nullptr;
     if (status_timer_) lv_timer_delete(status_timer_);
     status_timer_ = nullptr;
     if (radio_timer_) lv_timer_delete(radio_timer_);
@@ -413,21 +474,49 @@ void Ground0Home::on_status_timer(lv_timer_t *timer) noexcept
 
 void Ground0Home::load_settings()
 {
-    const int index = ground0::theme_from_id(config_get_str("ground0_theme", "chromeshore").c_str());
+    namespace settings = ground0::settings;
+    const int index = ground0::theme_from_id(settings::get("theme", "chromeshore").c_str());
     ground0::set_theme(index < 0 ? 0 : index);
-    view_ = config_get_str("ground0_view", "list") == "grid" ? View::Grid : View::List;
-    saved_tab_ = config_get_str("ground0_tab", "All apps");
-    favorites_ = split_list(config_get_str("ground0_favs", ""));
-    recents_ = split_list(config_get_str("ground0_recent", ""));
+    view_ = settings::get("view", "list") == "grid" ? View::Grid : View::List;
+    saved_tab_ = settings::get("tab", "All apps");
+    favorites_ = settings::list("fav");
+    recents_ = settings::list("recent");
 }
 
+// Settings are written a moment after the last change, not on the key press
+// itself, so stepping through lists or themes never waits for the card.
+// Anything still unwritten is written before an app starts and on the way out.
 void Ground0Home::save_settings()
 {
-    config_set_str("ground0_theme", ground0::theme().id);
-    config_set_str("ground0_view", view_ == View::Grid ? "grid" : "list");
-    config_set_str("ground0_tab", tab_label());
-    config_set_str("ground0_favs", join_list(favorites_));
-    config_set_str("ground0_recent", join_list(recents_));
+    settings_dirty_ = true;
+    if (save_timer_)
+        lv_timer_reset(save_timer_);
+    else
+        save_timer_ = lv_timer_create(on_save_timer, 1200, this);
+}
+
+void Ground0Home::flush_settings()
+{
+    if (save_timer_) lv_timer_delete(save_timer_);
+    save_timer_ = nullptr;
+    if (!settings_dirty_) return;
+    settings_dirty_ = false;
+    namespace settings = ground0::settings;
+    settings::put("theme", ground0::theme().id);
+    settings::put("view", view_ == View::Grid ? "grid" : "list");
+    settings::put("tab", tab_restored_ ? tab_label() : saved_tab_);
+    settings::put_list("fav", favorites_);
+    settings::put_list("recent", recents_);
+    settings::save();     // only the keys that changed, and nothing when none did
+}
+
+void Ground0Home::on_save_timer(lv_timer_t *timer) noexcept
+{
+    try {
+        auto *self = static_cast<Ground0Home *>(lv_timer_get_user_data(timer));
+        if (self) self->flush_settings();
+    } catch (...) {
+    }
 }
 
 std::size_t Ground0Home::page_size() const
@@ -447,6 +536,12 @@ void Ground0Home::set_items(std::vector<Ground0Item> items, std::size_t selected
     items_ = std::move(items);
     items_.erase(std::remove_if(items_.begin(), items_.end(), [](const Ground0Item &item) { return item.command >= 0; }),
                  items_.end());
+    // A different set of apps than last time: the index is out of date.
+    std::size_t signature = items_.size();
+    for (const Ground0Item &item : items_)
+        signature = signature * 1099511628211ull ^ std::hash<std::string>{}(item.exec + '\n' + item.name);
+    if (apps_signature_ != 0 && signature != apps_signature_) index_wanted_ = true;
+    apps_signature_ = signature;
     load_index();
     // Commands ride along after the apps; they only ever show up in search results.
     auto add_command = [this](int id, std::string name, const char *kind = "Command") {
@@ -478,7 +573,13 @@ void Ground0Home::set_items(std::vector<Ground0Item> items, std::size_t selected
     add_command(kCmdUpdateAll, "Update all apps");
     for (int i = 0; i < ground0::theme_count(); ++i)
         add_command(kCmdTheme + i, ground0::theme_at(i).name, "Theme");
-    rebuild_tabs(tabs_.empty() ? saved_tab_ : tab_label());
+    // The list that was open last time can be a store category or "Updates",
+    // which only exist once the apps are known: keep asking for the saved one
+    // until the first real app list has arrived.
+    const bool have_apps = std::any_of(items_.begin(), items_.end(),
+                                       [](const Ground0Item &item) { return item.command < 0; });
+    rebuild_tabs(tab_restored_ ? tab_label() : saved_tab_);
+    if (have_apps) tab_restored_ = true;
     refilter(selected);
 }
 
@@ -649,13 +750,49 @@ void Ground0Home::paint_radio()
     lv_obj_set_style_bg_opa(radio_chip_, filled ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
     const uint32_t on_fill = is_dark(status_color_) ? 0xffffff : 0x000000;
     lv_obj_set_style_text_color(radio_label_, hex(filled ? on_fill : status_color_), LV_PART_MAIN);
-    lv_label_set_text(radio_label_, radio_pending_ ? "..." : (filled ? "MESH" : "FREE"));
+    set_label(radio_label_, radio_pending_ ? "..." : (filled ? "MESH" : "FREE"));
 }
 
-void Ground0Home::refresh_radio()
+// The launcher is back on its home screen: bring the status bar up to date.
+void Ground0Home::resume()
 {
-    ground0::Radio::instance().poll();
-    paint_radio();
+    if (!root_) return;
+    // The app just closed may have been the Store or an updater: when the
+    // Store's record of installed apps has changed, the index is out of date.
+    // (The store catalog itself is looked at again a few times a day.)
+    const long store = file_stamp(store_record_path());
+    if (store != store_stamp_ ||
+        std::chrono::steady_clock::now() - index_asked_ > std::chrono::hours(6))
+        index_wanted_ = true;
+    update_status();
+}
+
+// Collects the answers of the background reads (radio state, lean boot, Wi-Fi)
+// and stops when none is outstanding.
+void Ground0Home::watch_probes()
+{
+    if (!probe_timer_) probe_timer_ = lv_timer_create(on_probe_timer, 60, this);
+}
+
+void Ground0Home::on_probe_timer(lv_timer_t *timer) noexcept
+{
+    try {
+        auto *self = static_cast<Ground0Home *>(lv_timer_get_user_data(timer));
+        if (!self) return;
+        ground0::Radio &radio = ground0::Radio::instance();
+        bool repaint_quick = false;
+        if (radio.poll_done()) {
+            if (self->root_) self->paint_radio();
+            repaint_quick = true;
+        }
+        if (self->quick_reads_.poll(self->lean_, self->wifi_)) repaint_quick = true;
+        if (repaint_quick && self->root_) self->paint_quick();
+        if (!radio.polling() && !self->quick_reads_.running()) {
+            lv_timer_delete(timer);
+            self->probe_timer_ = nullptr;
+        }
+    } catch (...) {
+    }
 }
 
 void Ground0Home::toggle_radio()
@@ -671,8 +808,8 @@ void Ground0Home::expect_radio(bool mesh_on)
 {
     radio_target_mesh_ = mesh_on;
     radio_pending_ = true;
-    radio_polls_left_ = 14;
-    if (!radio_timer_) radio_timer_ = lv_timer_create(on_radio_timer, 700, this);
+    radio_polls_left_ = 25;     // ten seconds
+    if (!radio_timer_) radio_timer_ = lv_timer_create(on_radio_timer, 400, this);
     paint_radio();
 }
 
@@ -683,8 +820,14 @@ void Ground0Home::on_radio_timer(lv_timer_t *timer) noexcept
         if (!self) return;
         const ground0::RadioState want =
             self->radio_target_mesh_ ? ground0::RadioState::Mesh : ground0::RadioState::Free;
-        const bool reached = ground0::Radio::instance().poll() == want;
-        if (!reached && --self->radio_polls_left_ > 0) return;
+        // Asked in the background; this looks at the latest answer and asks again.
+        ground0::Radio &radio = ground0::Radio::instance();
+        radio.poll_done();
+        const bool reached = radio.state() == want;
+        if (!reached && --self->radio_polls_left_ > 0) {
+            radio.poll_start();
+            return;
+        }
         self->radio_pending_ = false;
         lv_timer_delete(timer);
         self->radio_timer_ = nullptr;
@@ -828,6 +971,14 @@ void Ground0Home::set_icon(lv_obj_t *image, const std::string &path, uint32_t si
 {
     if (!image) return;
     const lv_image_dsc_t *src = (lookup_ && !path.empty()) ? lookup_(path, size) : nullptr;
+    // Decoded icons keep their address until release_icons(), which clears every
+    // image first, so the same address always means the same picture.
+    if (lv_image_get_src(image) == src) return;
+    // An icon that could not be read comes back as the launcher's generic one,
+    // which has one size: scale it to this slot.
+    const uint32_t scale = src == &home_icon_fallback && home_icon_fallback.header.w > 0
+                               ? size * 256u / home_icon_fallback.header.w : 256u;
+    if (lv_image_get_scale(image) != static_cast<int32_t>(scale)) lv_image_set_scale(image, scale);
     lv_image_set_src(image, src);
 }
 
@@ -865,18 +1016,17 @@ void Ground0Home::bind()
                           : tab_kind() == TabKind::Updates ? "Updates: all up to date" : "No apps");
         else
             std::snprintf(buffer, sizeof(buffer), "%s  %zu of %zu", tab_label().c_str(), selected_ + 1, count);
-        lv_label_set_text(strip_left_, buffer);
+        set_label(strip_left_, buffer);
         // Search text takes the accent colour where that reads against the strip.
         const bool accent_reads = reads_on(t.accent, t.strip);
-        lv_obj_set_style_text_color(
-            strip_left_, hex(searching_ && accent_reads ? t.accent : t.strip_text), LV_PART_MAIN);
+        set_text_color(strip_left_, searching_ && accent_reads ? t.accent : t.strip_text);
     }
     if (strip_right_) {
         const ground0::Theme &t = ground0::theme();
         if (searching_) {
             char buffer[32];
             std::snprintf(buffer, sizeof(buffer), count == 1 ? "%zu match" : "%zu matches", count);
-            lv_label_set_text(strip_right_, buffer);
+            set_label(strip_right_, buffer);
         } else {
             const std::size_t updates = static_cast<std::size_t>(std::count_if(
                 items_.begin(), items_.end(), [](const Ground0Item &item) { return !item.next.empty(); }));
@@ -887,18 +1037,17 @@ void Ground0Home::bind()
                 std::snprintf(buffer, sizeof(buffer), updates == 1 ? "%zu update" : "%zu updates", updates);
             else
                 std::snprintf(buffer, sizeof(buffer), "%s", t.name);
-            lv_label_set_text(strip_right_, buffer);
+            set_label(strip_right_, buffer);
         }
     }
-    if (chip_label_)
-        lv_label_set_text(chip_label_, tab_kind() == TabKind::Updates && !searching_ ? "Enter update" : "Enter open");
+    set_label(chip_label_, tab_kind() == TabKind::Updates && !searching_ ? "Enter update" : "Enter open");
     if (foot_label_) {
         const char *hint = searching_
             ? "type to filter  Tab next  Enter open  Esc close"
             : grid_now()
                 ? "Tab lists  V fav  Space find  G list  T theme  Q quick"
                 : "Tab lists  V fav  Space find  G grid  T theme  Q quick";
-        lv_label_set_text(foot_label_, hint);
+        set_label(foot_label_, hint);
     }
 }
 
@@ -910,48 +1059,32 @@ void Ground0Home::bind_list()
         if (!row.box) continue;
         const std::size_t position = first_ + static_cast<std::size_t>(i);
         if (position >= visible_.size()) {
-            lv_obj_add_flag(row.box, LV_OBJ_FLAG_HIDDEN);
+            set_shown(row.box, false);
             continue;
         }
-        lv_obj_clear_flag(row.box, LV_OBJ_FLAG_HIDDEN);
+        set_shown(row.box, true);
         const std::size_t index = visible_[position];
         const bool on = position == selected_;
-        lv_obj_set_style_bg_opa(row.box, on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_opa(row.box, on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
-        if (row.name) {
-            lv_label_set_text(row.name, items_[index].name.c_str());
-            lv_obj_set_style_text_color(row.name, hex(on ? t.sel_text : t.text), LV_PART_MAIN);
-        }
-        if (row.mark) {
-            if (is_favorite(items_[index].name))
-                lv_obj_clear_flag(row.mark, LV_OBJ_FLAG_HIDDEN);
-            else
-                lv_obj_add_flag(row.mark, LV_OBJ_FLAG_HIDDEN);
-        }
-        if (row.badge) {
-            if (!items_[index].next.empty())
-                lv_obj_clear_flag(row.badge, LV_OBJ_FLAG_HIDDEN);
-            else
-                lv_obj_add_flag(row.badge, LV_OBJ_FLAG_HIDDEN);
-        }
+        set_highlight(row.box, on);
+        set_label(row.name, items_[index].name.c_str());
+        set_text_color(row.name, on ? t.sel_text : t.text);
+        set_shown(row.mark, is_favorite(items_[index].name));
+        set_shown(row.badge, !items_[index].next.empty());
         set_icon(row.icon, items_[index].icon, kRowIcon);
     }
 
     if (selected_ < visible_.size()) {
         const Ground0Item &item = items_[visible_[selected_]];
         set_icon(detail_icon_, item.icon, kDetailIcon);
-        if (detail_name_) lv_label_set_text(detail_name_, item.name.c_str());
-        if (detail_sub_) {
-            const std::string sub = !item.next.empty() ? "U: " + item.have + " > " + item.next
-                                    : !item.category.empty() ? item.category : item.detail;
-            lv_label_set_text(detail_sub_, sub.c_str());
-            lv_obj_set_style_text_color(
-                detail_sub_, hex(!item.next.empty() && reads_on(t.accent2, t.face) ? t.accent2 : t.dim), LV_PART_MAIN);
-        }
+        set_label(detail_name_, item.name.c_str());
+        const std::string sub = !item.next.empty() ? "U: " + item.have + " > " + item.next
+                                : !item.category.empty() ? item.category : item.detail;
+        set_label(detail_sub_, sub.c_str());
+        set_text_color(detail_sub_, !item.next.empty() && reads_on(t.accent2, t.face) ? t.accent2 : t.dim);
     } else {
         set_icon(detail_icon_, {}, kDetailIcon);
-        if (detail_name_) lv_label_set_text(detail_name_, "");
-        if (detail_sub_) lv_label_set_text(detail_sub_, "");
+        set_label(detail_name_, "");
+        set_label(detail_sub_, "");
     }
 }
 
@@ -963,18 +1096,15 @@ void Ground0Home::bind_grid()
         if (!cell.box) continue;
         const std::size_t position = first_ + static_cast<std::size_t>(i);
         if (position >= visible_.size()) {
-            lv_obj_add_flag(cell.box, LV_OBJ_FLAG_HIDDEN);
+            set_shown(cell.box, false);
             continue;
         }
-        lv_obj_clear_flag(cell.box, LV_OBJ_FLAG_HIDDEN);
+        set_shown(cell.box, true);
         const std::size_t index = visible_[position];
         const bool on = position == selected_;
-        lv_obj_set_style_bg_opa(cell.box, on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_opa(cell.box, on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
-        if (cell.name) {
-            lv_label_set_text(cell.name, items_[index].name.c_str());
-            lv_obj_set_style_text_color(cell.name, hex(on ? t.sel_text : t.text), LV_PART_MAIN);
-        }
+        set_highlight(cell.box, on);
+        set_label(cell.name, items_[index].name.c_str());
+        set_text_color(cell.name, on ? t.sel_text : t.text);
         set_icon(cell.icon, items_[index].icon, kCellIcon);
     }
 }
@@ -1000,8 +1130,14 @@ void Ground0Home::update_status()
     } else if (++dongle_nudges_ <= 4 || dongle_nudges_ % 4 == 0) {
         ground0::dongle_sync();
     }
-    if (!radio_pending_) refresh_radio();
+    // Asked in the background (see on_probe_timer): a busy system cannot stall the screen.
+    ground0::Radio::instance().poll_start();
+    watch_probes();
     if (!updating_ && file_stamp(cache_path("index.tsv")) != index_stamp_) apply_index();
+    // Not more often than every 20 seconds: installs arrive in bursts.
+    if (index_wanted_ && !updating_ &&
+        std::chrono::steady_clock::now() - index_asked_ > std::chrono::seconds(20))
+        request_index();
     paint_status();
 }
 
@@ -1014,13 +1150,13 @@ void Ground0Home::paint_status()
         const std::time_t now = std::time(nullptr);
         std::tm local{};
         if (localtime_r(&now, &local)) std::strftime(buffer, sizeof(buffer), "%H:%M", &local);
-        lv_label_set_text(clock_, buffer);
+        set_label(clock_, buffer);
     }
     if (battery_) {
         const cp0_battery_info_t battery = cp0_battery_read();
         char buffer[8] = "";
         if (battery.valid == 1) std::snprintf(buffer, sizeof(buffer), "%d%%", battery.soc);
-        lv_label_set_text(battery_, buffer);
+        set_label(battery_, buffer);
     }
 }
 
@@ -1201,6 +1337,7 @@ bool Ground0Home::is_favorite(const std::string &name) const
 void Ground0Home::switch_tab(int step)
 {
     if (tabs_.empty()) return;
+    tab_restored_ = true;       // the user chose a list: that is the one to remember
     const std::size_t keep = selected();
     const int count = static_cast<int>(tabs_.size());
     tab_index_ = static_cast<std::size_t>(((static_cast<int>(tab_index_) + step) % count + count) % count);
@@ -1239,7 +1376,8 @@ void Ground0Home::note_launch()
     recents_.erase(std::remove(recents_.begin(), recents_.end(), name), recents_.end());
     recents_.insert(recents_.begin(), name);
     if (recents_.size() > 12) recents_.resize(12);
-    save_settings();
+    settings_dirty_ = true;
+    flush_settings();   // the app is about to take over: nothing may be left unwritten
 }
 
 Ground0Home::TabKind Ground0Home::tab_kind() const
@@ -1254,7 +1392,9 @@ const std::string &Ground0Home::tab_label() const
 }
 
 // Favs, All, Recent, Updates when there are any, then each store category in use.
-void Ground0Home::rebuild_tabs(const std::string &keep_label)
+// `keep_label` is taken as a copy on purpose: callers pass tab_label(), which is
+// a reference into tabs_, and tabs_ is rebuilt here.
+void Ground0Home::rebuild_tabs(std::string keep_label)
 {
     tabs_.clear();
     tabs_.push_back({TabKind::Favs, "Favs"});
@@ -1308,8 +1448,15 @@ void Ground0Home::apply_index()
     set_items(std::move(items), keep);
 }
 
+// Categories and update marks come from the index the helper writes. It is
+// asked for at start, when the app list changes (an app was installed, removed
+// or updated by the Store or 0Hero), and when coming back from an app after a
+// while; the helper only rewrites the file when its content changed.
 void Ground0Home::request_index()
 {
+    index_wanted_ = false;
+    index_asked_ = std::chrono::steady_clock::now();
+    store_stamp_ = file_stamp(store_record_path());
     const std::string helper = helper_path();
     if (access(helper.c_str(), R_OK) != 0) return;
     const char *argv[] = {"python3", helper.c_str(), "index", nullptr};
@@ -1384,6 +1531,8 @@ void Ground0Home::open_quick()
 {
     if (quick_open_ || !root_) return;
     quick_open_ = true;
+    // The panel opens at once with the values it last knew; lean boot and Wi-Fi
+    // are read in the background and filled in a moment later.
     read_quick(true);
     build_quick();
     if (!quick_timer_) quick_timer_ = lv_timer_create(on_quick_timer, 1000, this);
@@ -1399,14 +1548,15 @@ void Ground0Home::close_quick()
 }
 
 // Lean boot and Wi-Fi each cost a process start, so they are read only when
-// the panel opens and shortly after one of them is switched.
+// the panel opens and shortly after one of them is switched, and in the
+// background (see on_probe_timer).
 void Ground0Home::read_quick(bool slow)
 {
     desk_ = ground0::desk_state();
     dongle_ = ground0::dongle_state();
     if (slow) {
-        lean_ = ground0::lean_boot();
-        wifi_ = ground0::wifi_state();
+        quick_reads_.start();
+        watch_probes();
     }
 }
 
@@ -1415,6 +1565,7 @@ void Ground0Home::build_quick()
     const ground0::Theme &t = ground0::theme();
     const int height = kQuickHead + kQuickRows * kQuickRowH + 5;
     quick_panel_ = box(root_, (kScreenW - kQuickW) / 2, (kScreenH - height) / 2 + 2, kQuickW, height, t.face);
+    quick_painted_ = -1;
     if (!quick_panel_) return;
     lv_obj_set_style_radius(quick_panel_, t.win_radius, LV_PART_MAIN);
     lv_obj_set_style_clip_corner(quick_panel_, true, LV_PART_MAIN);
@@ -1483,27 +1634,35 @@ void Ground0Home::paint_quick()
                           : dongle_.moved ? "On, using " + dongle_.adapter : "On, waiting";
     live[kQuickDongle] = dongle_.available && dongle_.enabled;
 
+    // The row fills change only when the cursor moves; the once-a-second
+    // refresh then redraws nothing unless a value changed.
+    const bool moved = quick_painted_ != quick_selected_;
+    quick_painted_ = quick_selected_;
     for (int i = 0; i < kQuickRows; ++i) {
         if (!quick_row_[i]) continue;
         const bool chosen = i == quick_selected_;
-        if (chosen) {
-            selection_fill(quick_row_[i]);
-        } else {
-            lv_obj_set_style_bg_grad_dir(quick_row_[i], LV_GRAD_DIR_NONE, LV_PART_MAIN);
-            lv_obj_set_style_bg_color(quick_row_[i], hex(t.face), LV_PART_MAIN);
+        if (moved) {
+            if (chosen) {
+                selection_fill(quick_row_[i]);
+            } else {
+                lv_obj_set_style_bg_grad_dir(quick_row_[i], LV_GRAD_DIR_NONE, LV_PART_MAIN);
+                lv_obj_set_style_bg_color(quick_row_[i], hex(t.face), LV_PART_MAIN);
+            }
         }
         const uint32_t ink = chosen ? t.sel_text : t.text;
         const uint32_t on = !chosen && reads_on(t.accent, t.face) ? t.accent : ink;
-        if (quick_name_[i]) lv_obj_set_style_text_color(quick_name_[i], hex(ink), LV_PART_MAIN);
-        if (quick_value_[i]) {
-            lv_label_set_text(quick_value_[i], value[i].c_str());
-            lv_obj_set_style_text_color(quick_value_[i], hex(live[i] ? on : chosen ? ink : t.dim), LV_PART_MAIN);
-        }
+        set_text_color(quick_name_[i], ink);
+        set_label(quick_value_[i], value[i].c_str());
+        set_text_color(quick_value_[i], live[i] ? on : chosen ? ink : t.dim);
     }
 }
 
 void Ground0Home::act_quick()
 {
+    // Lean boot and Wi-Fi switch to the opposite of what they are now: if their
+    // read is still on its way (Enter within a tenth of a second of opening the
+    // panel), wait for it.
+    if (quick_selected_ == kQuickLean || quick_selected_ == kQuickWifi) quick_reads_.finish(lean_, wifi_);
     switch (quick_selected_) {
     case kQuickRadio:
         toggle_radio();
@@ -1614,7 +1773,7 @@ void Ground0Home::on_quick_timer(lv_timer_t *timer) noexcept
 void Ground0Home::run_command(int command)
 {
     auto quick_row = [this](int row) {
-        read_quick(true);
+        read_quick(true);       // act_quick() waits for the two slow values when it needs them
         quick_selected_ = row;
         act_quick();
     };

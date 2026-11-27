@@ -18,6 +18,8 @@
 // equals one of the listed words (case-insensitive).
 #pragma once
 
+#include "ground0_system.hpp"
+
 #include <string>
 #include <vector>
 
@@ -30,9 +32,15 @@ class Radio
 public:
     static Radio &instance();
 
-    // Ask systemd for the daemon's state. Absent: the unit is not installed.
+    // Ask systemd for the daemon's state and wait for the answer (about 50 ms,
+    // never more than three seconds). Absent: the unit is not installed.
     RadioState poll();
     RadioState state() const { return state_; }
+    // The same without waiting: start the question, then ask poll_done() from a
+    // timer. It returns true when an answer has arrived and state() is current.
+    void poll_start();
+    bool poll_done();
+    bool polling() const { return probe_.running(); }
 
     // Start or stop the daemon without waiting; poll() picks up the result.
     void request(bool mesh_on);
@@ -51,13 +59,15 @@ public:
 private:
     Radio();
     bool run(bool mesh_on, bool background);
+    void apply(const std::string &answer);
 
     std::string unit_;
-    std::vector<std::string> free_words_;
-    std::vector<std::string> mesh_words_;
+    std::string free_list_;       // comma separated, as in the settings
+    std::string mesh_list_;
     bool restore_ = true;
     bool simulated_ = false;      // GROUND0_RADIO_SIM: no systemd, state kept in memory
     RadioState state_ = RadioState::Absent;
+    Probe probe_;
 };
 
 } // namespace ground0

@@ -24,11 +24,11 @@ import sys
 import time
 
 HOME = os.path.expanduser("~")
-CACHE = os.path.join(HOME, ".cache", "ground0")
+CACHE = os.environ.get("GROUND0_CACHE_DIR") or os.path.join(HOME, ".cache", "ground0")
 INDEX = os.path.join(CACHE, "index.tsv")
 REGISTRY_CACHE = os.path.join(CACHE, "registry.json")
 LOG = os.path.join(CACHE, "update.log")
-STORE_STATE = os.path.join(HOME, ".local", "share", "cardputerzero-appstore")
+STORE_STATE = os.environ.get("GROUND0_STORE_STATE") or os.path.join(HOME, ".local", "share", "cardputerzero-appstore")
 APPS_DIR = os.environ.get("GROUND0_APPS_DIR", "/usr/share/APPLaunch/applications")
 REGISTRY_URL = "https://cardputerzero.github.io/generated/registry.json"
 REGISTRY_MAX_AGE = 6 * 3600
@@ -43,7 +43,14 @@ DESKTOP_CATEGORY = [  # first match wins
 
 
 def vtuple(v):
-    return tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.\-+~]", str(v)))
+    """A version as numbers, for comparing: "1.0" equals "1.0.0", "0.6.24-rev2" is newer than "-rev1"."""
+    parts = []
+    for piece in re.split(r"[.\-+~_:]", str(v)):
+        digits = re.search(r"\d+", piece)
+        parts.append(int(digits.group()) if digits else 0)
+    while parts and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
 
 
 def registry(allow_fetch=True):
@@ -64,10 +71,14 @@ def registry(allow_fetch=True):
                 os.remove(tmp)
             except OSError:
                 pass
+    # The catalog is somebody else's file and may change shape: anything that
+    # is not a list of app records is treated as "no catalog", never as an error.
     try:
-        return json.load(open(REGISTRY_CACHE)).get("apps", [])
+        data = json.load(open(REGISTRY_CACHE))
     except Exception:
         return []
+    apps = data.get("apps", []) if isinstance(data, dict) else data
+    return [a for a in apps if isinstance(a, dict)] if isinstance(apps, list) else []
 
 
 def desktop_fields(path):
@@ -85,22 +96,31 @@ def desktop_fields(path):
 def build_index():
     os.makedirs(CACHE, exist_ok=True)
     apps = registry()
-    by_uuid = {a.get("uuid"): a for a in apps if a.get("uuid")}
-    by_pkg = {(a.get("download") or {}).get("package"): a for a in apps}
-    by_pkg.pop(None, None)      # an app without a package name must not match apps without one
-    by_pkg.pop("", None)
+    by_uuid, by_pkg = {}, {}
+    for a in apps:
+        if isinstance(a.get("uuid"), str) and a["uuid"]:
+            by_uuid[a["uuid"]] = a
+        download = a.get("download")
+        package = download.get("package") if isinstance(download, dict) else None
+        if isinstance(package, str) and package:    # apps without a package name must not match each other
+            by_pkg[package] = a
 
     store = {}   # desktop path -> (uuid, package, installed version)
     try:
         installed = json.load(open(os.path.join(STORE_STATE, "installed.json")))
     except Exception:
         installed = {}
+    if not isinstance(installed, dict):
+        installed = {}
     for uuid, meta in installed.items():
         if not isinstance(meta, dict):
             continue
-        for path in meta.get("files", []):
-            if str(path).endswith(".desktop"):
-                store[os.path.realpath(path)] = (uuid, meta.get("package", ""), str(meta.get("version", "")))
+        files = meta.get("files")
+        for path in files if isinstance(files, list) else []:
+            if isinstance(path, str) and path.endswith(".desktop"):
+                package = meta.get("package")
+                store[os.path.realpath(path)] = (str(uuid), package if isinstance(package, str) else "",
+                                                 str(meta.get("version") or ""))
 
     lines = []
     for desk in sorted(glob.glob(os.path.join(APPS_DIR, "*.desktop"))):
@@ -111,20 +131,31 @@ def build_index():
         entry = by_uuid.get(uuid) or (by_pkg.get(package) if package else None)
         category, new = "", ""
         if entry:
-            category = (entry.get("categories") or [""])[0]
+            categories = entry.get("categories")
+            if isinstance(categories, str):
+                category = categories
+            elif isinstance(categories, list) and categories and isinstance(categories[0], str):
+                category = categories[0]
             latest = str(entry.get("version") or "")
             if have and latest and vtuple(latest) > vtuple(have):
                 new = latest
-            uuid = entry.get("uuid") or uuid
+            if isinstance(entry.get("uuid"), str) and entry["uuid"]:
+                uuid = entry["uuid"]
         if not category:
             wanted = f.get("Categories", "")
             category = next((ours for theirs, ours in DESKTOP_CATEGORY if theirs in wanted), "Other")
         clean = lambda s: str(s).replace("\t", " ").replace("\n", " ")
         lines.append("\t".join(clean(x) for x in (f["Exec"], category, uuid, have, new, f.get("Name", ""))))
 
+    text = "\n".join(lines) + "\n"
+    try:
+        if open(INDEX).read() == text:      # unchanged: leave the file (and its date) alone,
+            return len(lines)               # so the launcher does not reload for nothing
+    except OSError:
+        pass
     tmp = INDEX + ".part"
     with open(tmp, "w") as out:
-        out.write("\n".join(lines) + "\n")
+        out.write(text)
     os.replace(tmp, INDEX)
     return len(lines)
 
@@ -182,7 +213,11 @@ def apply_updates(uuids):
 
 def main(argv):
     if len(argv) >= 1 and argv[0] == "index":
-        print("%d entries" % build_index())
+        try:
+            print("%d entries" % build_index())
+        except Exception as error:      # the launcher keeps the index it has
+            print("index not rebuilt: %s" % error, file=sys.stderr)
+            return 1
         return 0
     if len(argv) >= 2 and argv[0] == "apply":
         return apply_updates(set(argv[1:]))
