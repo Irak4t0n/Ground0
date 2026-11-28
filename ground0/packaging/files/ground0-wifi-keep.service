@@ -1,0 +1,8 @@
+[Unit]
+Description=Ground0: join a known Wi-Fi network again after a failed reconnect
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=60
+ExecStart=/usr/lib/ground0/ground0-wifi keep

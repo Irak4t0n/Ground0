@@ -17,6 +17,7 @@ On the device ([video](ground0/docs/demo-device.mp4)):
 - **Radio switch.** One LoRa cap, several programs that want it. A status-bar chip shows whether MeshZero holds the radio (`MESH`) or it is free for apps (`FREE`). Apps that drive the radio themselves stop MeshZero when they open and hand it back when they close.
 - **Quick panel.** `Q` opens switches for the radio, the HDMI desktop, the keyboard handover to that desktop, lean boot, Wi-Fi and the Wi-Fi dongle.
 - **Wi-Fi follows a USB dongle.** Plug a USB Wi-Fi adapter in (USB switch on Host). Ground0 tests it beside the built-in radio for about a minute, then moves the network you are on over to it, with the same settings and address, and disconnects the built-in radio. Unplug it, or let an app take it over (monitor mode, an access point), and the built-in radio reconnects by itself; when the app gives it back, the adapter is tested and used again.
+- **Wi-Fi comes back by itself.** If Wi-Fi is on but has been on no network for about a minute, Ground0 joins your saved network again. NetworkManager gives a network up after one failed handshake (it takes that as a wrong password), which on a mesh with several access points under one name happens now and then; before this you had to reconnect by hand. Wi-Fi power saving is also switched off, which makes those failed handshakes rarer.
 - **24 themes.** Ten originals and fourteen classic desktop skins from [1999 Online](https://github.com/GoatsAndMonkeys/1999-online). Themes change chrome, fonts and layout details, not only colours.
 
 | Icon grid | Search |
@@ -71,7 +72,7 @@ Ground0 takes the stock launcher's place in `APPLaunch.service`. The stock launc
 
 If Ground0 crashes five times within a minute, the stock launcher starts instead until the next boot or `ground0 on`.
 
-The package adds a sudo rule file (`/etc/sudoers.d/ground0`) so the switches work without a password. It allows members of the `sudo` group to start and stop `meshzero.service`, to enable and disable `lightdm.service`, and to run Ground0's own Wi-Fi helper (`/usr/lib/ground0/ground0-wifi`) with its five fixed commands. Nothing else.
+The package adds a sudo rule file (`/etc/sudoers.d/ground0`) so the switches work without a password. It allows members of the `sudo` group to start and stop `meshzero.service`, to enable and disable `lightdm.service`, and to run Ground0's own Wi-Fi helper (`/usr/lib/ground0/ground0-wifi`) with its fixed commands. Nothing else.
 
 ## Optional pieces
 
@@ -85,6 +86,10 @@ The package adds a sudo rule file (`/etc/sudoers.d/ground0`) so the switches wor
 A row whose piece is missing says so instead of doing nothing.
 
 **Wi-Fi on a USB dongle** is on by default and has its own row in the quick panel. It is handled by a small system service that reacts when an adapter is plugged in or pulled out, so it keeps working even if the launcher is not running. The built-in radio is not given up until the adapter has joined the network, held the connection and kept answering from the gateway for 30 seconds (about a minute in all). An adapter that fails that test, or drops out later, is left alone (the row shows it as unstable) and the built-in radio carries on; press Enter on the row to test it again.
+
+**Wi-Fi comes back by itself.** A timer (`ground0-wifi-keep.timer`) checks once a minute. When Wi-Fi is switched on but the radio carrying it (the built-in one, or the dongle when Wi-Fi has moved there) has sat on no network for about a minute, it asks NetworkManager to join a known network again, and logs it (`journalctl -t ground0-wifi`). Away from any known network it tries every five minutes instead. It leaves alone Wi-Fi that is switched off, a radio you disconnected yourself, an adapter lent to an app, and anything in monitor mode. Turn it off with `sudo systemctl disable --now ground0-wifi-keep.timer`.
+
+**Wi-Fi power saving off.** The package adds `/usr/lib/NetworkManager/conf.d/20-ground0-wifi-powersave.conf`. With power saving on, the Cardputer Zero's built-in radio misses handshakes while it sits idle. It costs a little battery; to turn power saving back on, put `wifi.powersave = 3` in a `[connection]` section of a file of your own under `/etc/NetworkManager/conf.d/`. It takes effect the next time Wi-Fi connects.
 
 **Apps that want the adapter for themselves.** Some tools (Marauder, for one) only take a Wi-Fi adapter that is idle and refuse one that is carrying a connection. Before Ground0 starts one of those it moves Wi-Fi back to the built-in radio and leaves the adapter disconnected; when you are back on the home screen it moves Wi-Fi to the adapter again, without repeating the test if the adapter was never unplugged. An app is one of these when its `.desktop` file says `X-Ground0-WifiAdapter=idle`, or when it is in the `dongle_apps` setting (default `marauder,marauder_cardputerzero,zerogotchi,lokicz,lokictl,quartermaster,raspyjack,run-raspyjack.sh`).
 
@@ -140,7 +145,7 @@ scons -j8
 export CardputerZero=y CONFIG_REPO_AUTOMATION=y
 scons -j8
 # package
-../../ground0/packaging/build-deb.sh dist/M5CardputerZero-APPLaunch 0.2.10
+../../ground0/packaging/build-deb.sh dist/M5CardputerZero-APPLaunch 0.2.11
 # Ground0's own tests (a C++17 compiler; no root, no Cardputer, no Wi-Fi adapter)
 sh ../../ground0/tests/run.sh
 ```

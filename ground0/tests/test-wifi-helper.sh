@@ -28,6 +28,7 @@ case "$1 $2" in
     case "$(cat "$N/state.$5")" in 100) echo "100 (connected)";; 30) echo "30 (disconnected)";; 10) echo "10 (unmanaged)";; *) echo "$(cat "$N/state.$5") (other)";; esac ;;
 "-g GENERAL.CON-UUID") known "$5" || exit 10; grep "^$(cat "$N/con.$5" 2>/dev/null) " "$N/cons" 2>/dev/null | cut -d' ' -f2 ;;
 "-g GENERAL.CONNECTION") known "$5" || exit 10; cat "$N/con.$5" 2>/dev/null ;;
+"-g GENERAL.AUTOCONNECT") known "$5" || exit 10; cat "$N/autoconnect.$5" 2>/dev/null ;;
 "-g IP4.GATEWAY") echo 192.168.4.1 ;;
 "radio wifi") case "$3" in on) echo enabled > "$N/radio";; off) echo disabled > "$N/radio";; *) cat "$N/radio";; esac ;;
 "connection delete") grep -q "^$4 " "$N/cons" || exit 10
@@ -48,6 +49,8 @@ case "$1 $2" in
 esac
 exit 0
 EOF
+# The clock is ours too: "now" in $T/nm/now when a test sets it.
+printf '#!/bin/sh\nif [ -e %s/nm/now ]; then cat %s/nm/now; else /bin/date "$@"; fi\n' "$T" "$T" > "$T/bin/date"
 for tool in logger ping sleep; do printf '#!/bin/sh\nexit 0\n' > "$T/bin/$tool"; done
 printf '#!/bin/sh\nexit 1\n' > "$T/bin/systemctl"     # so "on", "off" and "return" sync in place
 chmod +x "$T/bin"/*
@@ -186,5 +189,62 @@ run return
 case_name="unplug after moving: built-in takes over"
 fresh; plug wlan1 usb 95; run sync; moved
 unplug wlan1; run sync; on_builtin
+
+# --- keep: join a known network again after NetworkManager gave up -----------
+at() { echo "$1" > "$N/now"; }
+connects() { grep -c "device connect $1" "$N/calls" 2>/dev/null; }
+dropped() { echo 30 > "$N/state.$1"; : > "$N/con.$1"; }
+
+case_name="keep: connected Wi-Fi is left alone"
+fresh; at 1000; : > "$N/calls"; run keep
+is "no reconnect" "$(connects wlan0)" 0; hasnt "no down marker" "$R/ground0-wifi-down"
+
+case_name="keep: dropped, NetworkManager gets a minute first"
+dropped wlan0; at 1000; run keep
+is "not yet" "$(connects wlan0)" 0; has "down marker" "$R/ground0-wifi-down"
+at 1030; run keep; is "still not yet at 30s" "$(connects wlan0)" 0
+
+case_name="keep: after a minute it joins again"
+at 1060; run keep
+is "one reconnect" "$(connects wlan0)" 1; on_builtin
+hasnt "marker cleared" "$R/ground0-wifi-down"; grep -q "joined Howards again" "$T/out"; is "logged" $? 0
+
+case_name="keep: nothing known in range, then every five minutes"
+fresh; : > "$N/calls"; dropped wlan0; : > "$N/fail.connect.wlan0"
+at 2000; run keep; at 2060; run keep
+is "tried once" "$(connects wlan0)" 1; grep -q "every 5 minutes" "$T/out"; is "said so" $? 0
+at 2120; run keep; at 2300; run keep; is "not again within five minutes" "$(connects wlan0)" 1
+at 2361; run keep; is "again after five minutes" "$(connects wlan0)" 2
+rm -f "$N/fail.connect.wlan0"; at 2662; run keep; on_builtin; hasnt "marker cleared" "$R/ground0-wifi-down"
+
+case_name="keep: Wi-Fi switched off is left off"
+fresh; : > "$N/calls"; dropped wlan0; echo disabled > "$N/radio"
+at 3000; run keep; at 3100; run keep
+is "no reconnect" "$(connects wlan0)" 0; hasnt "no marker" "$R/ground0-wifi-down"
+
+case_name="keep: a radio disconnected on purpose stays disconnected"
+fresh; : > "$N/calls"; dropped wlan0; echo no > "$N/autoconnect.wlan0"
+at 4000; run keep; at 4100; run keep
+is "no reconnect" "$(connects wlan0)" 0
+
+case_name="keep: monitor mode is not touched"
+fresh; : > "$N/calls"; dropped wlan0; echo 803 > "$T/sys/class/net/wlan0/type"
+at 5000; run keep; at 5100; run keep
+is "no reconnect" "$(connects wlan0)" 0
+
+case_name="keep: during a dongle test nothing happens"
+fresh; : > "$N/calls"; dropped wlan0; : > "$R/ground0-wifi-trial"
+at 6000; run keep; at 6100; run keep
+is "no reconnect" "$(connects wlan0)" 0
+
+case_name="keep: with Wi-Fi moved to the stick, the stick is the one rejoined"
+fresh; plug wlan1 usb 30; run sync; moved; : > "$N/calls"
+dropped wlan1; at 7000; run keep; at 7060; run keep
+is "stick rejoined" "$(connects wlan1)" 1; is "built-in left alone" "$(connects wlan0)" 0
+
+case_name="keep: a stick lent to an app is not touched"
+fresh; plug wlan1 usb 30; run sync; run lend; : > "$N/calls"
+at 8000; run keep; at 8060; run keep
+is "stick stays idle" "$(st wlan1)" 30; is "no reconnect of the stick" "$(connects wlan1)" 0; on_builtin
 
 if [ "$fails" = 0 ]; then echo "ground0-wifi: $checks checks passed"; else echo "ground0-wifi: $fails of $checks checks FAILED"; exit 1; fi

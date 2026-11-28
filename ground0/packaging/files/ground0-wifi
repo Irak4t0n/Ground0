@@ -7,6 +7,8 @@
 #   radio-on | radio-off   switch Wi-Fi itself
 #   lend | return   leave the adapter idle for an app that wants it for itself
 #                   (monitor mode), then take it back when that app has closed
+#   keep       (every minute, from ground0-wifi-keep.timer) join a known network
+#              again when Wi-Fi is on but has been on none for about a minute
 #
 # "Follow" means: while a USB Wi-Fi adapter is plugged in and in normal
 # (managed) mode, the network the built-in radio is on moves to the adapter,
@@ -37,6 +39,7 @@ LOST=/run/ground0-wifi-lost        # when the adapter vanished while it had the 
 LENT=/run/ground0-wifi-lent        # an app has the adapter: "<ifindex left idle>"
 PROVEN=/run/ground0-wifi-proven    # ifindex of an adapter that passed its trial and was lent
 BACK=/run/ground0-wifi-back        # lent: the built-in radio still has to take over (done once)
+DOWN=/run/ground0-wifi-down        # keep: "<device> <since> <next try>" while Wi-Fi is on no network
 CLONE=ground0-dongle
 TRIAL=30
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -244,6 +247,43 @@ sync_once() {
     fi
 }
 
+# Wi-Fi that is switched on but has been on no network for about a minute is
+# joined to a known network again. NetworkManager gives a network up after one
+# failed handshake: it takes that as a wrong password and waits for someone to
+# type a new one, so the device stays off the network until it is reconnected
+# by hand. With several access points under one name, a hop between them that
+# times out does exactly that now and then.
+# Left alone: Wi-Fi switched off, a device someone disconnected on purpose
+# (its autoconnect is off: "nmcli device disconnect", or an adapter lent to an
+# app), monitor mode, a test or a move under way. Away from any known network it
+# tries every five minutes instead of every minute.
+keep_once() {
+    [ "$(nmcli radio wifi 2>/dev/null)" = enabled ] || { rm -f "$DOWN"; return 0; }
+    [ -e "$TRYING" ] && return 0
+    adapters
+    dev=$onboard
+    [ -e "$STATE" ] && [ -n "$usb" ] && [ ! -e "$LENT" ] && dev=$usb   # moved: the adapter carries Wi-Fi
+    [ -n "$dev" ] || { rm -f "$DOWN"; return 0; }
+    if busy "$dev" || ! nmcli -g GENERAL.STATE device show "$dev" 2>/dev/null | grep -q '^30 ' \
+        || [ "$(nmcli -g GENERAL.AUTOCONNECT device show "$dev" 2>/dev/null)" = no ]; then
+        rm -f "$DOWN"; return 0                     # connected, on its way, or not ours to touch
+    fi
+    now=$(date +%s)
+    set -- $(cat "$DOWN" 2>/dev/null)
+    if [ "$1" != "$dev" ]; then
+        echo "$dev $now $((now + 50))" > "$DOWN"; return 0   # first sight: give NetworkManager a minute
+    fi
+    since=$2; next=$3
+    [ "$now" -ge "${next:-0}" ] || return 0
+    if nmcli --wait 30 device connect "$dev" >/dev/null 2>&1; then
+        log "Wi-Fi ($dev) was on no network for $((now - since))s: joined $(active_name "$dev") again"
+        rm -f "$DOWN"
+    else
+        [ "$next" = "$((since + 50))" ] && log "Wi-Fi ($dev) is on no network and no known one answered: trying every 5 minutes"
+        echo "$dev $since $((now + 300))" > "$DOWN"
+    fi
+}
+
 case "$1" in
 sync)
     exec 9>/run/ground0-wifi.lock
@@ -265,6 +305,10 @@ radio-on)
     sleep 3
     systemctl --no-block start ground0-wifi.service 2>/dev/null || true ;;
 radio-off) nmcli radio wifi off ;;
+keep)
+    exec 9>/run/ground0-wifi.lock
+    flock -n 9 || exit 0                           # a sync is running: next minute
+    keep_once ;;
 lend)
     # The marker first: a trial that is running sees it and stops within seconds.
     [ -e "$LENT" ] || echo 0 > "$LENT"
@@ -292,5 +336,5 @@ return)
         log "USB adapter ($usb) is back from an app"
     fi
     systemctl --no-block start ground0-wifi.service 2>/dev/null || "$0" sync ;;
-*) echo "usage: ground0-wifi sync | on | off | radio-on | radio-off | lend | return"; exit 2 ;;
+*) echo "usage: ground0-wifi sync | on | off | radio-on | radio-off | lend | return | keep"; exit 2 ;;
 esac

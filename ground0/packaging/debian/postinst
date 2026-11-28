@@ -17,6 +17,11 @@ if [ "$1" = configure ]; then
         mkdir -p /etc/ground0 && : > /etc/ground0/wifi-follow
     fi
     systemctl --no-block start ground0-wifi.service 2>/dev/null || true
+    # Join a known network again when a reconnect fails (every minute).
+    systemctl enable --now ground0-wifi-keep.timer >/dev/null 2>&1 || true
+    # Power saving off takes effect the next time Wi-Fi connects; nothing is
+    # disconnected here, so an install over SSH is not cut off.
+    nmcli general reload conf >/dev/null 2>&1 || true
     # The launcher is not restarted here: it may be the program running this install.
     echo "Ground0 is installed. It takes over at the next boot, or now with: ground0 on"
 fi

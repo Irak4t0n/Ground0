@@ -2,6 +2,7 @@
 set -e
 # Give Wi-Fi back to the built-in radio before the helper goes away.
 if [ "$1" = remove ]; then
+    systemctl disable --now ground0-wifi-keep.timer >/dev/null 2>&1 || true
     rm -f /etc/ground0/wifi-follow
     # An adapter that was put aside for an app is released first.
     /usr/lib/ground0/ground0-wifi return >/dev/null 2>&1 || true
